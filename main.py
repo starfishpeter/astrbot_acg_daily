@@ -121,26 +121,29 @@ class AcgDailyPlugin(Star):
         self._daily_publish_task: asyncio.Task | None = None
         self._last_scheduled_publish_date: str | None = None
         self._last_scheduled_publish_keys: set[tuple[str, str]] = set()
+        self._accept_results = True
 
     async def initialize(self):
         self._daily_publish_task = asyncio.create_task(self._run_daily_publish_scheduler())
         logger.info("ACG 日报：定时发布调度器已启动，将每 %d 秒检查一次配置。", _SCHEDULER_POLL_SECONDS)
 
     async def terminate(self):
-        if self._daily_publish_task is None:
-            return
-        self._daily_publish_task.cancel()
-        try:
-            await self._daily_publish_task
-        except asyncio.CancelledError:
-            pass
-        self._daily_publish_task = None
-        logger.info("ACG 日报：定时发布调度器已停止。")
+        self._accept_results = False
+        if self._daily_publish_task is not None:
+            self._daily_publish_task.cancel()
+            try:
+                await self._daily_publish_task
+            except asyncio.CancelledError:
+                pass
+            self._daily_publish_task = None
+        logger.info("ACG 日报：插件实例已停止，进行中的旧任务完成后不会再发送结果。")
 
     @filter.command("acg日报", alias={"ACG日报"})
     async def acg_daily(self, event: AstrMessageEvent):
         """即时抓取已配置的 ACG 资讯源并发送单张长图日报。"""
 
+        if not self._can_send_result("命令执行"):
+            return
         urls = self._source_urls()
         logger.info(
             "ACG 日报：收到来自 %s 的命令，当前配置了 %d 个资讯源。",
@@ -157,6 +160,8 @@ class AcgDailyPlugin(Star):
         async with lock:
             cached = self._cached_image(session_key)
             if cached is not None:
+                if not self._can_send_result("缓存日报"):
+                    return
                 logger.info("ACG 日报：命中冷却缓存，直接返回 %s 的单张长图日报。", session_key)
                 for image in cached:
                     yield event.image_result(image)
@@ -169,6 +174,8 @@ class AcgDailyPlugin(Star):
                 yield event.plain_result(f"生成 ACG 日报失败：{exc}")
                 return
 
+            if not self._can_send_result("已生成的日报"):
+                return
             self._cache[session_key] = CacheEntry(time.monotonic(), images)
             logger.info(
                 "ACG 日报：文转图完成，已为 %s 生成单张长图日报。",
@@ -273,6 +280,8 @@ class AcgDailyPlugin(Star):
             started_at = time.monotonic()
             try:
                 images = await self._create_daily_images_for_session(target, urls)
+                if not self._can_send_result("定时日报"):
+                    return
                 logger.info(
                     "ACG 日报：定时发布已生成单张长图，开始发送至 %s。",
                     target,
@@ -321,6 +330,15 @@ class AcgDailyPlugin(Star):
         if not entry or cooldown == 0 or time.monotonic() - entry.created_at > cooldown:
             return None
         return entry.images
+
+    def _can_send_result(self, result_kind: str) -> bool:
+        if self._accept_results:
+            return True
+        logger.warning(
+            "ACG 日报：插件实例已重载或卸载，丢弃%s，避免旧任务重复发送。",
+            result_kind,
+        )
+        return False
 
     async def _await_editor_response(
         self,

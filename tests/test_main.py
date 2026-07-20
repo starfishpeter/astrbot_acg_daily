@@ -40,6 +40,14 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("return [image]", source)
         self.assertNotIn("items_per_page", source)
 
+    def test_reloaded_plugin_instance_discards_in_flight_results_before_sending(self):
+        source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn("self._accept_results = True", source)
+        self.assertIn("self._accept_results = False", source)
+        self.assertIn("_can_send_result", source)
+        self.assertIn("避免旧任务重复发送", source)
+
     def test_agent_format_failure_retries_without_tools_instead_of_sending_raw_candidates(self):
         source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
 
