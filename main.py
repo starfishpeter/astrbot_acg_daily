@@ -27,6 +27,7 @@ from .acg_daily.scraper import NewsScraper, SourceResult, deduplicate_articles, 
 
 
 _SCHEDULER_POLL_SECONDS = 15
+_EDITOR_MODEL_TIMEOUT_SECONDS = 120
 
 
 @dataclass
@@ -45,9 +46,18 @@ class _ScheduledDailyEvent:
 class DailyEditorHooks(BaseAgentRunHooks):
     """Report the editor's limited tool use in the normal AstrBot log."""
 
+    def __init__(self) -> None:
+        self.started_at = time.monotonic()
+        self.tool_call_count = 0
+
+    async def on_agent_begin(self, _run_context) -> None:
+        logger.info("ACG 日报：编辑 Agent 已启动，正在等待模型首次响应。")
+
     async def on_tool_start(self, _run_context, tool: FunctionTool, tool_args: dict | None) -> None:
+        self.tool_call_count += 1
         logger.info(
-            "ACG 日报：编辑模型开始调用工具「%s」，参数：%s。",
+            "ACG 日报：编辑模型开始第 %d 次工具调用「%s」，参数：%s。",
+            self.tool_call_count,
             tool.name,
             tool_args or {},
         )
@@ -58,6 +68,22 @@ class DailyEditorHooks(BaseAgentRunHooks):
             "ACG 日报：编辑模型完成工具「%s」调用，返回 %d 段结果。",
             tool.name,
             result_count,
+        )
+
+    async def on_agent_done(self, _run_context, _llm_response) -> None:
+        logger.info("ACG 日报：编辑 Agent 已完成，本次实际调用 %d 次联网工具。", self.tool_call_count)
+
+    def timeout_diagnosis(self) -> str:
+        elapsed = time.monotonic() - self.started_at
+        if self.tool_call_count == 0:
+            return (
+                f"Agent 已运行 {elapsed:.1f} 秒但未完成，未进入任何联网工具调用；"
+                "Tavily 未参与。当前只能定位到 Agent 预处理或模型首次响应等待阶段，"
+                "请结合 AstrBot Core 的模型提供商请求日志判断网络连接或上游模型响应情况。"
+            )
+        return (
+            f"Agent 已运行 {elapsed:.1f} 秒但未完成，已执行 {self.tool_call_count} 次联网工具调用；"
+            "超时发生在后续模型响应或 Agent 收尾阶段。"
         )
 
 
@@ -362,6 +388,7 @@ class AcgDailyPlugin(Star):
             logger.error("ACG 日报：无法准备编辑模型，已跳过未经翻译的原始候选：%s", exc)
             return DailyEdition("无法准备日报编辑模型，本次未展示未经翻译的原始候选。", []), None
         try:
+            agent_hooks: DailyEditorHooks | None = None
             if search_tools:
                 if ranking is not None:
                     logger.info(
@@ -376,15 +403,19 @@ class AcgDailyPlugin(Star):
                         provider_id,
                         len(articles),
                     )
-                response = await self.context.tool_loop_agent(
-                    event=event,
-                    chat_provider_id=provider_id,
-                    system_prompt=system_prompt,
-                    prompt=prompt,
-                    tools=search_tools,
-                    max_steps=12,
-                    tool_call_timeout=30,
-                    agent_hooks=DailyEditorHooks(),
+                agent_hooks = DailyEditorHooks()
+                response = await asyncio.wait_for(
+                    self.context.tool_loop_agent(
+                        event=event,
+                        chat_provider_id=provider_id,
+                        system_prompt=system_prompt,
+                        prompt=prompt,
+                        tools=search_tools,
+                        max_steps=12,
+                        tool_call_timeout=30,
+                        agent_hooks=agent_hooks,
+                    ),
+                    timeout=_EDITOR_MODEL_TIMEOUT_SECONDS,
                 )
             else:
                 logger.info(
@@ -392,10 +423,13 @@ class AcgDailyPlugin(Star):
                     provider_id,
                     len(articles),
                 )
-                response = await self.context.llm_generate(
-                    chat_provider_id=provider_id,
-                    system_prompt=system_prompt,
-                    prompt=prompt,
+                response = await asyncio.wait_for(
+                    self.context.llm_generate(
+                        chat_provider_id=provider_id,
+                        system_prompt=system_prompt,
+                        prompt=prompt,
+                    ),
+                    timeout=_EDITOR_MODEL_TIMEOUT_SECONDS,
                 )
             edition, translated_ranking, ranking_error = parse_edition_with_ranking(
                 response.completion_text,
@@ -414,6 +448,18 @@ class AcgDailyPlugin(Star):
             if edition.items:
                 return edition, translated_ranking
             return DailyEdition(edition.intro or "本次候选资讯中没有适合收录的内容。", []), translated_ranking
+        except asyncio.TimeoutError:
+            if not search_tools:
+                logger.error(
+                    "ACG 日报：编辑模型等待超过 %d 秒，已跳过未经翻译的原始候选。",
+                    _EDITOR_MODEL_TIMEOUT_SECONDS,
+                )
+                return DailyEdition("编辑模型响应超时，本次未展示未经翻译的原始候选。", []), None
+            logger.warning(
+                "ACG 日报：带联网工具的编辑等待超过 %d 秒，已取消工具循环并使用同一模型进行一次无工具重试。诊断：%s",
+                _EDITOR_MODEL_TIMEOUT_SECONDS,
+                agent_hooks.timeout_diagnosis() if agent_hooks else "未获得 Agent 诊断状态。",
+            )
         except Exception as exc:
             if not search_tools:
                 logger.error("ACG 日报：编辑模型未返回合规 JSON，已跳过未经翻译的原始候选：%s", exc)
@@ -423,10 +469,14 @@ class AcgDailyPlugin(Star):
                 exc,
             )
         try:
-            response = await self.context.llm_generate(
-                chat_provider_id=provider_id,
-                system_prompt=system_prompt,
-                prompt=prompt,
+            logger.info("ACG 日报：开始使用模型 %s 进行无工具重试。", provider_id)
+            response = await asyncio.wait_for(
+                self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    system_prompt=system_prompt,
+                    prompt=prompt,
+                ),
+                timeout=_EDITOR_MODEL_TIMEOUT_SECONDS,
             )
             edition, translated_ranking, ranking_error = parse_edition_with_ranking(
                 response.completion_text,
@@ -440,6 +490,12 @@ class AcgDailyPlugin(Star):
             elif translated_ranking is not None:
                 logger.info("ACG 日报：无工具重试已中文化 %d 条排行榜标题。", len(translated_ranking.entries))
             return DailyEdition(edition.intro or "本次候选资讯中没有适合收录的内容。", edition.items), translated_ranking
+        except asyncio.TimeoutError:
+            logger.error(
+                "ACG 日报：无工具重试等待超过 %d 秒，已跳过未经翻译的原始候选。",
+                _EDITOR_MODEL_TIMEOUT_SECONDS,
+            )
+            return DailyEdition("编辑模型响应超时，本次未展示未经翻译的原始候选。", []), None
         except Exception as retry_exc:
             logger.error(
                 "ACG 日报：无工具重试仍未返回合规 JSON，已跳过未经翻译的原始候选：%s",

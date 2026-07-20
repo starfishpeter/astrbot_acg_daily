@@ -13,6 +13,8 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn(10, constants)
         self.assertIn("max_steps=12", source)
         self.assertIn("最多 10 次联网名称核对", source)
+        self.assertIn("_EDITOR_MODEL_TIMEOUT_SECONDS = 120", source)
+        self.assertIn("asyncio.wait_for", source)
 
     def test_scheduled_publish_uses_context_send_message_and_lifecycle_hooks(self):
         source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
@@ -41,6 +43,11 @@ class MainSourceTests(unittest.TestCase):
         source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
 
         self.assertIn("无工具重试", source)
+        self.assertIn("带联网工具的编辑等待超过", source)
+        self.assertIn("无工具重试等待超过", source)
+        self.assertIn("开始使用模型 %s 进行无工具重试", source)
+        self.assertIn("编辑 Agent 已启动，正在等待模型首次响应", source)
+        self.assertIn("Tavily 未参与", source)
         self.assertIn("已跳过未经翻译的原始候选", source)
         self.assertNotIn("fallback_edition(articles, max_items)", source)
 
