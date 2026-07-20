@@ -12,7 +12,7 @@ from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 
 from .acg_daily.editor import SYSTEM_PROMPT, build_editor_prompt, fallback_edition, parse_edition
-from .acg_daily.image_report import build_daily_image_html
+from .acg_daily.image_report import build_daily_image_html, normalize_cover_data_uri
 from .acg_daily.models import Article, DailyEdition
 from .acg_daily.scraper import NewsScraper, SourceResult, deduplicate_articles, is_http_url
 
@@ -20,7 +20,7 @@ from .acg_daily.scraper import NewsScraper, SourceResult, deduplicate_articles, 
 @dataclass
 class CacheEntry:
     created_at: float
-    image: str
+    images: list[str]
 
 
 class DailyEditorHooks(BaseAgentRunHooks):
@@ -74,7 +74,7 @@ class AcgDailyPlugin(Star):
 
     @filter.command("acg日报", alias={"ACG日报"})
     async def acg_daily(self, event: AstrMessageEvent):
-        """即时抓取已配置的 ACG 资讯源并发送单张图片日报。"""
+        """即时抓取已配置的 ACG 资讯源并发送清晰的分页图片日报。"""
 
         urls = self._source_urls()
         logger.info(
@@ -92,24 +92,27 @@ class AcgDailyPlugin(Star):
         async with lock:
             cached = self._cached_image(session_key)
             if cached is not None:
-                logger.info("ACG 日报：命中冷却缓存，直接返回 %s 的上次日报。", session_key)
-                yield event.image_result(cached)
+                logger.info("ACG 日报：命中冷却缓存，直接返回 %s 的 %d 页日报。", session_key, len(cached))
+                for image in cached:
+                    yield event.image_result(image)
                 return
 
             try:
-                image = await self._create_daily_image(event, urls)
+                images = await self._create_daily_images(event, urls)
             except Exception as exc:
                 logger.exception("ACG 日报：生成失败。")
                 yield event.plain_result(f"生成 ACG 日报失败：{exc}")
                 return
 
-            self._cache[session_key] = CacheEntry(time.monotonic(), image)
+            self._cache[session_key] = CacheEntry(time.monotonic(), images)
             logger.info(
-                "ACG 日报：文转图完成，已为 %s 生成单张图片日报。",
+                "ACG 日报：文转图完成，已为 %s 生成 %d 页图片日报。",
                 session_key,
+                len(images),
             )
             logger.info("ACG 日报：正在向聊天平台发送图片日报。")
-            yield event.image_result(image)
+            for image in images:
+                yield event.image_result(image)
 
     def _source_urls(self) -> list[str]:
         configured = self.config.get("news_source_urls", [])
@@ -124,18 +127,18 @@ class AcgDailyPlugin(Star):
                 urls.append(url)
         return urls[:20]
 
-    def _cached_image(self, session_key: str) -> str | None:
+    def _cached_image(self, session_key: str) -> list[str] | None:
         cooldown = max(0, int(self.config.get("cooldown_seconds", 60)))
         entry = self._cache.get(session_key)
         if not entry or cooldown == 0 or time.monotonic() - entry.created_at > cooldown:
             return None
-        return entry.image
+        return entry.images
 
-    async def _create_daily_image(
+    async def _create_daily_images(
         self,
         event: AstrMessageEvent,
         urls: list[str],
-    ) -> str:
+    ) -> list[str]:
         scraper = NewsScraper(
             timeout_seconds=int(self.config.get("request_timeout_seconds", 10)),
             max_articles_per_source=int(self.config.get("max_articles_per_source", 10)),
@@ -154,7 +157,7 @@ class AcgDailyPlugin(Star):
         )
         if not articles:
             logger.warning("ACG 日报：没有提取到可用资讯。")
-            return await self._render_daily_image(
+            return await self._render_daily_images(
                 DailyEdition("本次未从已配置资讯源中提取到可用资讯。", []),
                 [],
                 {},
@@ -165,13 +168,14 @@ class AcgDailyPlugin(Star):
         edition = await self._edit_with_current_model(event, articles, max_items)
         selected_ids = {item.article_id for item in edition.items}
         selected = [article for article in articles if article.id in selected_ids]
-        cover_images = await scraper.fetch_cover_images(selected)
+        raw_cover_images = await scraper.fetch_cover_images(selected)
+        cover_images = await self._prepare_cover_images(raw_cover_images)
         logger.info(
-            "ACG 日报：入选 %d 条资讯，成功下载 %d 张封面，将开始生成图片。",
+            "ACG 日报：入选 %d 条资讯，成功下载并适配 %d 张封面，将开始生成图片。",
             len(selected),
             len(cover_images),
         )
-        return await self._render_daily_image(edition, articles, cover_images, results)
+        return await self._render_daily_images(edition, articles, cover_images, results)
 
     async def _edit_with_current_model(
         self,
@@ -255,39 +259,65 @@ class AcgDailyPlugin(Star):
         logger.info("ACG 日报：已为编辑模型注入网页搜索工具「%s」。", tool_name)
         return ToolSet([SingleUseSearchTool(tool)])
 
-    async def _render_daily_image(
+    async def _prepare_cover_images(self, covers: dict[int, str]) -> dict[int, str]:
+        """Adapt downloaded covers for Chromium before putting them in HTML."""
+
+        if not covers:
+            return {}
+
+        normalized: dict[int, str] = {}
+        for article_id, cover in covers.items():
+            try:
+                normalized[article_id] = await asyncio.to_thread(normalize_cover_data_uri, cover)
+            except Exception as exc:
+                logger.info("ACG 日报：封面格式适配失败，将使用分类视觉卡（资讯 #%d）：%s", article_id, exc)
+        logger.info("ACG 日报：已将 %d/%d 张封面压缩为渲染兼容 JPEG。", len(normalized), len(covers))
+        return normalized
+
+    async def _render_daily_images(
         self,
         edition: DailyEdition,
         articles: list[Article],
         cover_images: dict[int, str],
         results: list[SourceResult],
-    ) -> str:
+    ) -> list[str]:
         success_count = sum(1 for result in results if result.articles)
         date_text = datetime.now().astimezone().strftime("%Y 年 %m 月 %d 日")
         source_status = f"本次抓取 {success_count}/{len(results)} 个来源，筛选 {len(edition.items)} 条资讯"
-        html = build_daily_image_html(
-            edition,
-            articles,
-            cover_images,
-            date_text,
-            source_status,
-        )
-        logger.info(
-            "ACG 日报：开始调用 AstrBot 文转图服务，渲染 %d 条资讯（HTML %d 字符）。",
-            len(edition.items),
-            len(html),
-        )
-        try:
-            image = await self.html_render(
-                html,
-                {},
-                options={"type": "jpeg", "quality": 88, "full_page": True, "animations": "disabled"},
+        items_per_page = 4
+        pages = [edition.items[index:index + items_per_page] for index in range(0, len(edition.items), items_per_page)] or [[]]
+        images: list[str] = []
+        for page_index, page_items in enumerate(pages, start=1):
+            page_edition = DailyEdition(edition.intro, page_items)
+            html = build_daily_image_html(
+                page_edition,
+                articles,
+                cover_images,
+                date_text,
+                source_status,
+                page_number=page_index,
+                page_count=len(pages),
+                page_start=(page_index - 1) * items_per_page + 1,
             )
-        except Exception as exc:
-            logger.exception("ACG 日报：AstrBot 文转图服务渲染失败：%s", exc)
-            raise RuntimeError("AstrBot 文转图服务渲染失败") from exc
-        if not image:
-            logger.error("ACG 日报：AstrBot 文转图服务未返回图片地址。")
-            raise RuntimeError("AstrBot 文转图服务未返回图片地址")
-        logger.info("ACG 日报：AstrBot 文转图服务渲染成功，已获得图片地址。")
-        return image
+            logger.info(
+                "ACG 日报：开始调用 AstrBot 文转图服务，渲染第 %d/%d 页（%d 条资讯，HTML %d 字符）。",
+                page_index,
+                len(pages),
+                len(page_items),
+                len(html),
+            )
+            try:
+                image = await self.html_render(
+                    html,
+                    {},
+                    options={"type": "png", "full_page": True, "animations": "disabled"},
+                )
+            except Exception as exc:
+                logger.exception("ACG 日报：AstrBot 文转图服务渲染失败（第 %d 页）：%s", page_index, exc)
+                raise RuntimeError("AstrBot 文转图服务渲染失败") from exc
+            if not image:
+                logger.error("ACG 日报：AstrBot 文转图服务未返回第 %d 页图片地址。", page_index)
+                raise RuntimeError("AstrBot 文转图服务未返回图片地址")
+            images.append(image)
+        logger.info("ACG 日报：AstrBot 文转图服务渲染成功，共获得 %d 页图片。", len(images))
+        return images

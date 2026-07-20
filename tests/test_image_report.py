@@ -1,10 +1,35 @@
+import base64
+import io
 import unittest
 
-from acg_daily.image_report import build_daily_image_html
+from PIL import Image
+
+from acg_daily.image_report import build_daily_image_html, normalize_cover_data_uri
 from acg_daily.models import Article, DailyEdition, EditedItem
 
 
 class ImageReportTests(unittest.TestCase):
+    def test_normalize_cover_converts_transparent_png_to_bounded_rgb_jpeg(self):
+        source = Image.new("RGBA", (1600, 1000), (255, 0, 0, 0))
+        source.putpixel((800, 500), (0, 80, 255, 255))
+        source_bytes = io.BytesIO()
+        source.save(source_bytes, format="PNG")
+        cover = "data:image/png;base64," + base64.b64encode(source_bytes.getvalue()).decode("ascii")
+
+        normalized = normalize_cover_data_uri(cover)
+
+        self.assertTrue(normalized.startswith("data:image/jpeg;base64,"))
+        image_bytes = base64.b64decode(normalized.split(",", 1)[1], validate=True)
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            self.assertEqual(image.format, "JPEG")
+            self.assertEqual(image.mode, "RGB")
+            self.assertLessEqual(image.width, 960)
+            self.assertLessEqual(image.height, 720)
+
+    def test_normalize_cover_rejects_invalid_data_uri(self):
+        with self.assertRaises(ValueError):
+            normalize_cover_data_uri("data:image/jpeg;base64,not valid base64")
+
     def test_report_uses_cover_and_escapes_editor_content(self):
         article = Article(
             1,
@@ -35,7 +60,8 @@ class ImageReportTests(unittest.TestCase):
         )
 
         self.assertIn('src="data:image/jpeg;base64,aGVsbG8="', html)
-        self.assertIn('class="lead-story"', html)
+        self.assertIn('class="story-card feature accent-1"', html)
+        self.assertIn("次元放送局", html)
         self.assertIn("Example &lt;Source&gt;", html)
         self.assertIn("A &lt; B", html)
         self.assertIn("Summary &amp; detail", html)
@@ -50,7 +76,25 @@ class ImageReportTests(unittest.TestCase):
 
         self.assertIn('class="cover-placeholder cover-placeholder-featured"', html)
         self.assertIn("漫画", html)
-        self.assertIn("ACG NEWS", html)
+        self.assertIn("NO IMAGE / ACG DESK", html)
+
+    def test_report_renders_a_continued_page_with_global_item_numbers(self):
+        article = Article(5, "原标题", "", "https://example.com", "来源")
+        edition = DailyEdition("导语", [EditedItem(5, "游戏", "标题", "摘要", "")])
+
+        html = build_daily_image_html(
+            edition,
+            [article],
+            {},
+            "日期",
+            "状态",
+            page_number=2,
+            page_count=2,
+            page_start=5,
+        )
+
+        self.assertIn("续页 02 / 02", html)
+        self.assertIn("05", html)
 
 
 if __name__ == "__main__":

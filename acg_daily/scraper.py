@@ -22,7 +22,9 @@ from bs4 import BeautifulSoup
 from .models import Article
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-MAX_IMAGE_BYTES = 1024 * 1024
+# Covers are decoded and recompressed before rendering. Allow a reasonable
+# source-file size here so common 1200px+ publisher artwork is not discarded.
+MAX_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_REDIRECTS = 3
 # Some public feeds, including Bahamut GNN, block unknown bot user agents while
 # serving their public RSS normally to browser-compatible clients.
@@ -711,12 +713,12 @@ class NewsScraper:
                 if response.content_length is not None and response.content_length > MAX_IMAGE_BYTES:
                     raise ValueError(
                         "cover is "
-                        f"{response.content_length} bytes and exceeds the 1 MiB limit ({current_url})",
+                        f"{response.content_length} bytes and exceeds the 4 MiB limit ({current_url})",
                     )
                 body = await response.content.read(MAX_IMAGE_BYTES + 1)
                 if len(body) > MAX_IMAGE_BYTES:
                     raise ValueError(
-                        f"cover exceeds the 1 MiB limit ({len(body)} bytes read, {current_url})",
+                        f"cover exceeds the 4 MiB limit ({len(body)} bytes read, {current_url})",
                     )
                 encoded = base64.b64encode(body).decode("ascii")
                 return f"data:{content_type};base64,{encoded}"

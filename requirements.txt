@@ -1,3 +1,4 @@
 aiohttp>=3.10,<4
 beautifulsoup4>=4.12,<5
 feedparser>=6.0,<7
+Pillow>=10.4,<13

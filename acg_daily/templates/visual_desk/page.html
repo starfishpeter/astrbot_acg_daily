@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --ink: #17243c;
+    --blue: #235aa6;
+    --blue-deep: #163a72;
+    --sky: #bde9f7;
+    --paper: #fffaf0;
+    --yellow: #ffd84e;
+    --pink: #ff8eb5;
+    --mint: #72d9bb;
+    --line: #17243c;
+    --muted: #63718a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background: #d6e6f0;
+    font-family: "Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif;
+  }
+  .report {
+    position: relative;
+    width: 1440px;
+    min-height: 1750px;
+    padding: 42px;
+    overflow: hidden;
+    background:
+      linear-gradient(90deg, rgba(35,90,166,.05) 1px, transparent 1px) 0 0 / 32px 32px,
+      linear-gradient(rgba(35,90,166,.05) 1px, transparent 1px) 0 0 / 32px 32px,
+      var(--paper);
+  }
+  .report::before {
+    position: absolute;
+    right: -185px;
+    top: 360px;
+    width: 510px;
+    height: 510px;
+    border: 48px solid rgba(114,217,187,.26);
+    border-radius: 50%;
+    content: "";
+  }
+  .signal-bar {
+    display: flex;
+    position: relative;
+    z-index: 1;
+    height: 18px;
+    margin-bottom: 18px;
+    border: 3px solid var(--line);
+  }
+  .signal-bar span { flex: 1; border-right: 3px solid var(--line); }
+  .signal-bar span:last-child { border-right: 0; }
+  .signal-bar span:nth-child(1) { background: var(--yellow); }
+  .signal-bar span:nth-child(2) { background: var(--pink); }
+  .signal-bar span:nth-child(3) { background: var(--mint); }
+  .signal-bar span:nth-child(4) { background: var(--blue); }
+  .masthead {
+    position: relative;
+    z-index: 1;
+    min-height: 250px;
+    padding: 34px 40px;
+    overflow: hidden;
+    border: 4px solid var(--line);
+    background: var(--blue);
+    box-shadow: 12px 12px 0 var(--line);
+    color: #fff;
+  }
+  .masthead::before {
+    position: absolute;
+    top: -140px;
+    right: 92px;
+    width: 340px;
+    height: 340px;
+    border: 35px solid var(--yellow);
+    border-radius: 50%;
+    content: "";
+  }
+  .masthead::after {
+    position: absolute;
+    top: -52px;
+    right: -32px;
+    width: 192px;
+    height: 192px;
+    background: var(--pink);
+    transform: rotate(28deg);
+    content: "";
+  }
+  .masthead-meta, .masthead h1, .masthead p, .edition-box { position: relative; z-index: 1; }
+  .masthead-meta {
+    display: flex;
+    justify-content: space-between;
+    max-width: 1030px;
+    color: var(--yellow);
+    font-size: 17px;
+    font-weight: 900;
+    letter-spacing: 3px;
+  }
+  .masthead h1 {
+    margin: 21px 0 8px;
+    font-size: 66px;
+    font-weight: 900;
+    letter-spacing: 3px;
+    line-height: 1;
+  }
+  .masthead p {
+    max-width: 760px;
+    margin: 14px 0 0;
+    color: #dceeff;
+    font-size: 21px;
+    line-height: 1.55;
+  }
+  .edition-box {
+    position: absolute;
+    right: 38px;
+    bottom: 34px;
+    padding: 11px 16px;
+    border: 3px solid var(--line);
+    color: var(--line);
+    background: var(--yellow);
+    font-size: 17px;
+    font-weight: 900;
+    letter-spacing: 1px;
+  }
+  .brief {
+    position: relative;
+    z-index: 1;
+    margin: 42px 0 30px;
+    padding: 21px 25px 22px 30px;
+    border: 4px solid var(--line);
+    border-left: 16px solid var(--pink);
+    background: #fff;
+    box-shadow: 8px 8px 0 rgba(23,36,60,.14);
+    font-size: 25px;
+    font-weight: 700;
+    line-height: 1.55;
+  }
+  .brief-label {
+    display: inline-block;
+    margin-right: 12px;
+    padding: 4px 8px;
+    color: var(--line);
+    background: var(--yellow);
+    font-size: 14px;
+    font-weight: 900;
+    letter-spacing: 1px;
+    vertical-align: 4px;
+  }
+  .headline-stack { position: relative; z-index: 1; }
+  .story-card {
+    position: relative;
+    overflow: hidden;
+    border: 4px solid var(--line);
+    background: #fff;
+    box-shadow: 9px 9px 0 rgba(23,36,60,.16);
+  }
+  .story-card.feature {
+    display: grid;
+    grid-template-columns: 1.05fr .95fr;
+    min-height: 510px;
+    margin-bottom: 27px;
+  }
+  .story-card.standard {
+    display: flex;
+    min-height: 254px;
+    margin-top: 24px;
+  }
+  .story-cover {
+    position: relative;
+    overflow: hidden;
+    background: #d3edf1;
+  }
+  .feature .story-cover { height: 510px; }
+  .standard .story-cover { width: 365px; height: 254px; flex: 0 0 365px; }
+  .cover-image {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .story-body {
+    position: relative;
+    min-width: 0;
+    padding: 28px 31px 26px;
+    background: #fff;
+  }
+  .feature .story-body { padding: 35px 40px 31px; }
+  .story-card.accent-2 .story-body { background: #fff8dc; }
+  .story-card.accent-3 .story-body { background: #eefcf6; }
+  .story-card.accent-4 .story-body { background: #fff0f5; }
+  .story-meta {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    color: var(--blue-deep);
+    font-size: 16px;
+    font-weight: 900;
+    letter-spacing: .6px;
+  }
+  .story-number {
+    display: inline-flex;
+    min-width: 49px;
+    height: 32px;
+    align-items: center;
+    justify-content: center;
+    border: 2px solid var(--line);
+    background: var(--yellow);
+  }
+  .story-category { padding-left: 11px; border-left: 2px solid var(--line); }
+  .story-source {
+    min-width: 0;
+    margin-left: auto;
+    overflow: hidden;
+    color: var(--muted);
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .story-title {
+    margin: 17px 0 0;
+    color: var(--ink);
+    font-size: 31px;
+    font-weight: 900;
+    letter-spacing: -.8px;
+    line-height: 1.26;
+  }
+  .feature .story-title { font-size: 42px; line-height: 1.2; }
+  .story-summary {
+    margin: 15px 0 0;
+    color: #3f4c62;
+    font-size: 19px;
+    line-height: 1.62;
+  }
+  .feature .story-summary { font-size: 21px; line-height: 1.64; }
+  .story-note {
+    display: block;
+    margin-top: 17px;
+    padding: 10px 12px;
+    border-left: 7px solid var(--pink);
+    color: #4c5667;
+    background: rgba(255,255,255,.72);
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1.45;
+  }
+  .story-note span { margin-right: 9px; color: var(--blue-deep); font-weight: 900; }
+  .cover-placeholder {
+    position: relative;
+    display: flex;
+    width: 100%;
+    height: 100%;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    color: var(--line);
+    background:
+      repeating-linear-gradient(45deg, rgba(23,36,60,.11) 0 8px, transparent 8px 24px),
+      var(--sky);
+  }
+  .cover-placeholder-featured { background-color: var(--mint); }
+  .cover-placeholder strong {
+    position: relative;
+    z-index: 2;
+    max-width: 82%;
+    padding: 12px 20px;
+    border: 4px solid var(--line);
+    background: var(--yellow);
+    box-shadow: 8px 8px 0 var(--line);
+    font-size: 38px;
+    font-weight: 900;
+    letter-spacing: 3px;
+    text-align: center;
+  }
+  .cover-placeholder-featured strong { font-size: 52px; }
+  .cover-kicker, .cover-code { position: absolute; z-index: 2; font-size: 13px; font-weight: 900; letter-spacing: 1px; }
+  .cover-kicker { top: 21px; left: 22px; }
+  .cover-code { right: 20px; bottom: 19px; }
+  .cover-orbit { position: absolute; border: 5px solid var(--pink); border-radius: 50%; }
+  .orbit-one { width: 310px; height: 310px; right: -110px; top: -120px; }
+  .orbit-two { width: 170px; height: 170px; left: -84px; bottom: -76px; border-color: var(--yellow); }
+  .empty-state {
+    padding: 110px 45px;
+    border: 4px solid var(--line);
+    background: #fff;
+    text-align: center;
+  }
+  .empty-state span { color: var(--blue); font-weight: 900; letter-spacing: 2px; }
+  .empty-state h2 { margin: 18px 0; font-size: 36px; }
+  .empty-state p { color: var(--muted); font-size: 20px; }
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    position: relative;
+    z-index: 1;
+    margin-top: 34px;
+    padding: 22px 4px 0;
+    border-top: 4px solid var(--line);
+    color: var(--muted);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: .4px;
+  }
+  .footer strong { color: var(--blue-deep); letter-spacing: 1.1px; }
+</style>
+</head>
+<body>
+  <main class="report">
+    <div class="signal-bar"><span></span><span></span><span></span><span></span></div>
+    <header class="masthead">
+      <div class="masthead-meta"><span>ACG VISUAL DESK / ISSUE 01</span><span>{{DATE}}</span></div>
+      <h1>次元放送局</h1>
+      <p>{{SOURCE_STATUS}}</p>
+      <div class="edition-box">{{PAGE_LABEL}} / {{PAGE_NUMBER}}-{{PAGE_COUNT}}</div>
+    </header>
+    <section class="brief"><span class="brief-label">EDITOR NOTE</span>{{INTRO}}</section>
+    <section class="headline-stack">
+      {{FEATURE}}
+      {{STORIES}}
+    </section>
+    <footer class="footer"><strong>ACG DAILY // VISUAL BULLETIN</strong><span>仅展示资讯来源，不展示原文链接</span></footer>
+  </main>
+</body>
+</html>
