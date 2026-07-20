@@ -1,6 +1,6 @@
 import unittest
 
-from acg_daily.editor import build_editor_prompt, parse_edition
+from acg_daily.editor import SYSTEM_PROMPT, build_editor_prompt, parse_edition
 from acg_daily.models import Article
 
 
@@ -29,6 +29,11 @@ class EditorTests(unittest.TestCase):
         self.assertIn('"id":1', prompt)
         self.assertIn('"source":"Example News"', prompt)
         self.assertNotIn("https://example.com/one", prompt)
+
+    def test_editor_prompt_requires_chinese_title_handling(self):
+        self.assertIn("优先采用候选中已有的简体中文标题", SYSTEM_PROMPT)
+        self.assertIn("保留原文名", SYSTEM_PROMPT)
+        self.assertIn("一次日报最多调用一次搜索工具", SYSTEM_PROMPT)
 
     def test_parse_edition_rejects_unknown_and_duplicate_ids(self):
         response = """```json

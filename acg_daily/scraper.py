@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import re
 import socket
 from dataclasses import dataclass
@@ -21,8 +22,14 @@ from .models import Article
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 3
-USER_AGENT = "AstrBot-ACG-Daily/0.1 (+https://github.com/starfishpeter/astrbot_acg_daily)"
+# Some public feeds, including Bahamut GNN, block unknown bot user agents while
+# serving their public RSS normally to browser-compatible clients.
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 TRACKING_QUERY_KEYS = {"fbclid", "gclid", "mc_cid", "mc_eid", "ref"}
+logger = logging.getLogger("astrbot")
 
 
 @dataclass(frozen=True)
@@ -363,11 +370,13 @@ class NewsScraper:
         self.max_articles_per_source = max(1, min(max_articles_per_source, 20))
 
     async def collect(self, urls: list[str]) -> list[SourceResult]:
+        logger.info("ACG 日报：开始抓取 %d 个已配置资讯源。", len(urls))
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
         headers = {
             "User-Agent": USER_AGENT,
-            "Accept": "application/rss+xml, application/atom+xml, text/html, "
-            "application/xhtml+xml;q=0.9, */*;q=0.1",
+            "Accept": "application/rss+xml, application/atom+xml, application/xml, "
+            "text/html, application/xhtml+xml;q=0.9, */*;q=0.1",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
         connector = aiohttp.TCPConnector(resolver=PublicAddressResolver())
         async with aiohttp.ClientSession(
@@ -386,6 +395,19 @@ class NewsScraper:
                 normalized.append(SourceResult(url, urlsplit(url).hostname or url, [], str(result)))
             else:
                 normalized.append(result)
+        for result in normalized:
+            if result.error:
+                logger.warning(
+                    "ACG 日报：资讯源抓取失败（%s）：%s",
+                    result.url,
+                    result.error,
+                )
+            else:
+                logger.info(
+                    "ACG 日报：资讯源抓取成功（%s），获得 %d 条资讯。",
+                    result.source_name,
+                    len(result.articles),
+                )
         return normalized
 
     async def _collect_one(

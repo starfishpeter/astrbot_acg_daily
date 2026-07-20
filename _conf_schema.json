@@ -35,6 +35,12 @@
     "hint": "冷却时间内重复执行会复用刚生成的日报，避免重复抓取和模型调用。设为 0 可关闭。",
     "default": 60
   },
+  "enable_web_search": {
+    "type": "bool",
+    "description": "允许 AI 联网核对作品名",
+    "hint": "仅在资讯源没有中文标题且名称容易混淆时，允许日报编辑模型调用 AstrBot 已配置的网页搜索工具。默认关闭，以节省 Tavily 等搜索额度。",
+    "default": false
+  },
   "node_name": {
     "type": "string",
     "description": "转发节点显示名称",

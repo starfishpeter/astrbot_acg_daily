@@ -33,6 +33,21 @@ class ScraperTests(unittest.TestCase):
         self.assertEqual(articles[0].url, "https://example.com/first")
         self.assertEqual(articles[0].summary, "First summary")
 
+    def test_rss_extracts_cdata_links(self):
+        cdata_rss = b"""<?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0"><channel><title>Bahamut GNN</title>
+        <item><title><![CDATA[News title]]></title>
+        <description><![CDATA[News summary]]></description>
+        <link><![CDATA[https://gnn.gamer.com.tw/detail.php?sn=1]]></link>
+        <pubDate>Mon, 20 Jul 2026 10:00:00 +0800</pubDate></item>
+        </channel></rss>"""
+
+        name, articles = _feed_entries(cdata_rss, "https://gnn.gamer.com.tw/rss.xml", 10)
+
+        self.assertEqual(name, "Bahamut GNN")
+        self.assertEqual(len(articles), 1)
+        self.assertEqual(articles[0].url, "https://gnn.gamer.com.tw/detail.php?sn=1")
+
     def test_html_extracts_article_cards(self):
         name, articles = _html_entries(HTML, "https://example.com/news", 10)
 
