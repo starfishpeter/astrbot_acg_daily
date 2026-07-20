@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,7 +28,7 @@ from .acg_daily.scraper import NewsScraper, SourceResult, deduplicate_articles, 
 
 
 _SCHEDULER_POLL_SECONDS = 15
-_EDITOR_MODEL_TIMEOUT_SECONDS = 120
+_EDITOR_SLOW_WARNING_SECONDS = 120
 
 
 @dataclass
@@ -321,6 +322,35 @@ class AcgDailyPlugin(Star):
             return None
         return entry.images
 
+    async def _await_editor_response(
+        self,
+        operation,
+        stage: str,
+        agent_hooks: DailyEditorHooks | None = None,
+    ):
+        """Log a slow model request without cancelling a long daily edit."""
+
+        task = asyncio.ensure_future(operation)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=_EDITOR_SLOW_WARNING_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            diagnosis = agent_hooks.timeout_diagnosis() if agent_hooks else "尚未收到模型响应。"
+            logger.warning(
+                "ACG 日报：%s已等待超过 %d 秒，但不会取消，将继续等待。诊断：%s",
+                stage,
+                _EDITOR_SLOW_WARNING_SECONDS,
+                diagnosis,
+            )
+            return await task
+        except asyncio.CancelledError:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            raise
+
     async def _create_daily_images(
         self,
         event: AstrMessageEvent,
@@ -404,7 +434,7 @@ class AcgDailyPlugin(Star):
                         len(articles),
                     )
                 agent_hooks = DailyEditorHooks()
-                response = await asyncio.wait_for(
+                response = await self._await_editor_response(
                     self.context.tool_loop_agent(
                         event=event,
                         chat_provider_id=provider_id,
@@ -415,7 +445,8 @@ class AcgDailyPlugin(Star):
                         tool_call_timeout=30,
                         agent_hooks=agent_hooks,
                     ),
-                    timeout=_EDITOR_MODEL_TIMEOUT_SECONDS,
+                    "带联网工具的编辑",
+                    agent_hooks,
                 )
             else:
                 logger.info(
@@ -423,13 +454,13 @@ class AcgDailyPlugin(Star):
                     provider_id,
                     len(articles),
                 )
-                response = await asyncio.wait_for(
+                response = await self._await_editor_response(
                     self.context.llm_generate(
                         chat_provider_id=provider_id,
                         system_prompt=system_prompt,
                         prompt=prompt,
                     ),
-                    timeout=_EDITOR_MODEL_TIMEOUT_SECONDS,
+                    "无工具编辑",
                 )
             edition, translated_ranking, ranking_error = parse_edition_with_ranking(
                 response.completion_text,
@@ -448,18 +479,6 @@ class AcgDailyPlugin(Star):
             if edition.items:
                 return edition, translated_ranking
             return DailyEdition(edition.intro or "本次候选资讯中没有适合收录的内容。", []), translated_ranking
-        except asyncio.TimeoutError:
-            if not search_tools:
-                logger.error(
-                    "ACG 日报：编辑模型等待超过 %d 秒，已跳过未经翻译的原始候选。",
-                    _EDITOR_MODEL_TIMEOUT_SECONDS,
-                )
-                return DailyEdition("编辑模型响应超时，本次未展示未经翻译的原始候选。", []), None
-            logger.warning(
-                "ACG 日报：带联网工具的编辑等待超过 %d 秒，已取消工具循环并使用同一模型进行一次无工具重试。诊断：%s",
-                _EDITOR_MODEL_TIMEOUT_SECONDS,
-                agent_hooks.timeout_diagnosis() if agent_hooks else "未获得 Agent 诊断状态。",
-            )
         except Exception as exc:
             if not search_tools:
                 logger.error("ACG 日报：编辑模型未返回合规 JSON，已跳过未经翻译的原始候选：%s", exc)
@@ -470,13 +489,13 @@ class AcgDailyPlugin(Star):
             )
         try:
             logger.info("ACG 日报：开始使用模型 %s 进行无工具重试。", provider_id)
-            response = await asyncio.wait_for(
+            response = await self._await_editor_response(
                 self.context.llm_generate(
                     chat_provider_id=provider_id,
                     system_prompt=system_prompt,
                     prompt=prompt,
                 ),
-                timeout=_EDITOR_MODEL_TIMEOUT_SECONDS,
+                "无工具重试",
             )
             edition, translated_ranking, ranking_error = parse_edition_with_ranking(
                 response.completion_text,
@@ -490,12 +509,6 @@ class AcgDailyPlugin(Star):
             elif translated_ranking is not None:
                 logger.info("ACG 日报：无工具重试已中文化 %d 条排行榜标题。", len(translated_ranking.entries))
             return DailyEdition(edition.intro or "本次候选资讯中没有适合收录的内容。", edition.items), translated_ranking
-        except asyncio.TimeoutError:
-            logger.error(
-                "ACG 日报：无工具重试等待超过 %d 秒，已跳过未经翻译的原始候选。",
-                _EDITOR_MODEL_TIMEOUT_SECONDS,
-            )
-            return DailyEdition("编辑模型响应超时，本次未展示未经翻译的原始候选。", []), None
         except Exception as retry_exc:
             logger.error(
                 "ACG 日报：无工具重试仍未返回合规 JSON，已跳过未经翻译的原始候选：%s",
