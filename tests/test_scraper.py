@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from acg_daily.models import Article
 from acg_daily.scraper import (
@@ -9,6 +10,7 @@ from acg_daily.scraper import (
     canonical_url,
     deduplicate_articles,
     validate_source_url,
+    NewsScraper,
 )
 
 
@@ -35,26 +37,26 @@ class ScraperTests(unittest.TestCase):
         self.assertEqual(articles[0].summary, "First summary")
 
     def test_rss_removes_generic_news_prefix_from_source_name(self):
-        rss = RSS.replace(b"Example Feed", b"News - MyAnimeList")
+        rss = RSS.replace(b"Example Feed", b"News - Example Publisher")
 
-        name, _articles = _feed_entries(rss, "https://myanimelist.net/rss/news.xml", 10)
+        name, _articles = _feed_entries(rss, "https://example.com/feed", 10)
 
-        self.assertEqual(name, "MyAnimeList")
+        self.assertEqual(name, "Example Publisher")
 
     def test_rss_extracts_cdata_links(self):
         cdata_rss = b"""<?xml version="1.0" encoding="utf-8"?>
-        <rss version="2.0"><channel><title>Bahamut GNN</title>
+          <rss version="2.0"><channel><title>Example Publisher</title>
         <item><title><![CDATA[News title]]></title>
         <description><![CDATA[News summary]]></description>
-        <link><![CDATA[https://gnn.gamer.com.tw/detail.php?sn=1]]></link>
+          <link><![CDATA[https://example.com/detail?sn=1]]></link>
         <pubDate>Mon, 20 Jul 2026 10:00:00 +0800</pubDate></item>
         </channel></rss>"""
 
-        name, articles = _feed_entries(cdata_rss, "https://gnn.gamer.com.tw/rss.xml", 10)
+        name, articles = _feed_entries(cdata_rss, "https://example.com/feed", 10)
 
-        self.assertEqual(name, "Bahamut GNN")
+        self.assertEqual(name, "Example Publisher")
         self.assertEqual(len(articles), 1)
-        self.assertEqual(articles[0].url, "https://gnn.gamer.com.tw/detail.php?sn=1")
+        self.assertEqual(articles[0].url, "https://example.com/detail?sn=1")
 
     def test_rdf_rss_extracts_articles(self):
         rdf_rss = b"""<?xml version="1.0" encoding="utf-8"?>
@@ -72,28 +74,28 @@ class ScraperTests(unittest.TestCase):
         self.assertEqual(len(articles), 1)
         self.assertEqual(articles[0].title, "Anime announcement")
 
-    def test_rdf_rss_matches_animeanime_structure(self):
+    def test_rdf_rss_extracts_publication_date(self):
         rdf_rss = b"""<?xml version="1.0" encoding="utf-8"?>
         <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
           xmlns:dc="http://purl.org/dc/elements/1.1/"
           xmlns="http://purl.org/rss/1.0/">
-          <channel rdf:about="https://animeanime.jp/"><title>Anime Anime</title></channel>
-          <item rdf:about="https://animeanime.jp/article/2026/07/20/1.html">
+          <channel rdf:about="https://example.com/"><title>Example News</title></channel>
+          <item rdf:about="https://example.com/article/2026/07/20/1.html">
             <title>Anime announcement</title>
-            <link>https://animeanime.jp/article/2026/07/20/1.html</link>
+            <link>https://example.com/article/2026/07/20/1.html</link>
             <dc:date>2026-07-20T05:00:03Z</dc:date>
           </item>
         </rdf:RDF>"""
 
-        name, articles = _feed_entries(rdf_rss, "https://animeanime.jp/rss/index.rdf", 10)
+        name, articles = _feed_entries(rdf_rss, "https://example.com/feed.rdf", 10)
 
-        self.assertEqual(name, "Anime Anime")
+        self.assertEqual(name, "Example News")
         self.assertEqual(len(articles), 1)
         self.assertEqual(articles[0].published_at, "2026-07-20T05:00:03Z")
 
     def test_atom_enclosure_extracts_cover_image(self):
         atom = b"""<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"><title>LN News</title>
+          <feed xmlns="http://www.w3.org/2005/Atom"><title>Example Feed</title>
           <entry><title>Anime news</title>
             <link rel="enclosure" type="image/jpeg" href="https://images.example/cover.jpg" />
             <link rel="alternate" href="https://example.com/news/one" />
@@ -102,7 +104,7 @@ class ScraperTests(unittest.TestCase):
 
         name, articles = _feed_entries(atom, "https://example.com/feed", 10)
 
-        self.assertEqual(name, "LN News")
+        self.assertEqual(name, "Example Feed")
         self.assertEqual(len(articles), 1)
         self.assertEqual(articles[0].cover_url, "https://images.example/cover.jpg")
 
@@ -115,53 +117,169 @@ class ScraperTests(unittest.TestCase):
 
         self.assertEqual(cover_url, "https://example.com/images/hero.jpg")
 
-    def test_html_extracts_ann_cards_with_lazy_thumbnail(self):
-        page = b"""<!doctype html><html><head><title>Anime News Network</title></head><body>
-        <div class="mainfeed-day"><div class="herald box news">
-          <div class="thumbnail lazyload" data-src="/thumbnails/news.jpg"></div>
-          <div class="wrap"><h3><a href="/news/item">Anime announcement</a></h3>
-          <time datetime="2026-07-20T04:05:36+00:00">today</time>
-          <div class="snippet"><span class="hook">Official announcement details</span></div></div>
-        </div></div></body></html>"""
+    def test_article_page_cover_reads_post_entry_lazy_image(self):
+        page = b"""<!doctype html><html><body>
+        <div class="post-entry"><img src="/images/small.jpg"
+          data-srcset="/images/small.jpg 300w, /images/large.jpg 1200w"></div>
+        </body></html>"""
 
-        name, articles = _html_entries(page, "https://www.animenewsnetwork.com/", 10)
+        cover_url = _article_page_cover_url(page, "https://example.com/news/item")
 
-        self.assertEqual(name, "Anime News Network")
+        self.assertEqual(cover_url, "https://example.com/images/large.jpg")
+
+    def test_article_page_cover_uses_figure_before_non_content_images(self):
+        page = b"""<!doctype html><html><body>
+        <div class="advertisement"><img src="https://ads.example/banner.jpg"></div>
+        <div id="content-zone"><figure><img src="/images/cover.jpg"></figure></div>
+        </body></html>"""
+
+        cover_url = _article_page_cover_url(page, "https://example.com/news/item")
+
+        self.assertEqual(cover_url, "https://example.com/images/cover.jpg")
+
+    def test_article_page_cover_uses_main_fallback_without_advertising(self):
+        page = b"""<!doctype html><html><body><main>
+        <div class="advertisement"><img src="https://ads.example/banner.jpg"></div>
+        <div id="publisher-content"><ul class="image-grid">
+          <li><img data-src="/images/cover.jpg"></li>
+        </ul></div>
+        </main></body></html>"""
+
+        cover_url = _article_page_cover_url(page, "https://example.com/news/item")
+
+        self.assertEqual(cover_url, "https://example.com/images/cover.jpg")
+
+    def test_article_page_cover_accepts_gnn_webp_and_png_urls(self):
+        for image_name in ("cover.WEBP", "cover.PNG"):
+            with self.subTest(image_name=image_name):
+                page = (
+                    '<!doctype html><html><head><meta property="og:image" content="'
+                    f'https://p2.bahamut.com.tw/B/2KU/01/{image_name}"></head></html>'
+                ).encode()
+
+                cover_url = _article_page_cover_url(
+                    page,
+                    "https://gnn.gamer.com.tw/detail.php?sn=308461",
+                )
+
+                self.assertEqual(
+                    cover_url,
+                    f"https://p2.bahamut.com.tw/B/2KU/01/{image_name}",
+                )
+
+    def test_article_page_cover_returns_empty_for_ann_page_without_images(self):
+        page = b"""<!doctype html><html><body><main><article>
+        <h1>Magical Girl Witch Trials Soundtrack</h1><p>Streaming announcement.</p>
+        </article></main></body></html>"""
+
+        cover_url = _article_page_cover_url(
+            page,
+            "https://www.animenewsnetwork.com/press-release/example",
+        )
+
+        self.assertEqual(cover_url, "")
+
+    def test_fetch_cover_image_accepts_gnn_webp_and_png_responses(self):
+        class Content:
+            async def read(self, _limit):
+                return b"cover"
+
+        class Response:
+            status = 200
+            content_length = 5
+
+            def __init__(self, media_type):
+                self.headers = {"Content-Type": media_type}
+                self.content = Content()
+
+        class Request:
+            def __init__(self, response):
+                self.response = response
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class Session:
+            def __init__(self, response):
+                self.response = response
+
+            def get(self, *_args, **_kwargs):
+                return Request(self.response)
+
+        scraper = NewsScraper(timeout_seconds=10, max_articles_per_source=10)
+        url = "https://p2.bahamut.com.tw/B/2KU/01/cover"
+        for media_type in ("image/webp", "image/png"):
+            with self.subTest(media_type=media_type), patch(
+                "acg_daily.scraper.validate_source_url",
+                new=AsyncMock(),
+            ):
+                cover = asyncio.run(
+                    scraper._fetch_cover_image(Session(Response(media_type)), url),
+                )
+
+            self.assertEqual(cover, f"data:{media_type};base64,Y292ZXI=")
+
+    def test_detail_page_request_retries_before_fetching_gnn_cover(self):
+        article = Article(
+            1,
+            "GNN article",
+            "",
+            "https://gnn.gamer.com.tw/detail.php?sn=308461",
+            "GNN",
+        )
+        page = b"""<meta property="og:image" content="https://p2.bahamut.com.tw/cover.WEBP">"""
+        scraper = NewsScraper(timeout_seconds=10, max_articles_per_source=10)
+        session = object()
+
+        with (
+            patch(
+                "acg_daily.scraper._read_source_response",
+                new=AsyncMock(side_effect=[ValueError("HTTP 403"), (article.url, page, "text/html")]),
+            ) as read_response,
+            patch.object(
+                scraper,
+                "_fetch_cover_image",
+                new=AsyncMock(return_value="data:image/webp;base64,dGVzdA=="),
+            ) as fetch_cover,
+            patch("acg_daily.scraper.asyncio.sleep", new=AsyncMock()),
+        ):
+            cover, is_detail_cover = asyncio.run(scraper._fetch_article_cover_image(session, article))
+
+        self.assertEqual(read_response.await_count, 2)
+        fetch_cover.assert_awaited_once_with(session, "https://p2.bahamut.com.tw/cover.WEBP")
+        self.assertEqual(cover, "data:image/webp;base64,dGVzdA==")
+        self.assertTrue(is_detail_cover)
+
+    def test_html_extracts_visual_cards_with_class_based_headings(self):
+        page = b"""<!doctype html><html><head><title>Example Site</title></head><body>
+        <div class="story-card"><a href="/news/one">
+          <img src="https://img.example/cover.jpg"><div class="story-heading">Anime announcement</div>
+        </a></div></body></html>"""
+
+        name, articles = _html_entries(page, "https://example.com/", 10)
+
+        self.assertEqual(name, "Example Site")
         self.assertEqual(len(articles), 1)
-        self.assertEqual(articles[0].cover_url, "https://www.animenewsnetwork.com/thumbnails/news.jpg")
-        self.assertEqual(articles[0].summary, "Official announcement details")
+        self.assertEqual(articles[0].title, "Anime announcement")
+        self.assertEqual(articles[0].url, "https://example.com/news/one")
+        self.assertEqual(articles[0].cover_url, "https://img.example/cover.jpg")
 
-    def test_html_extracts_myanimelist_news_cards(self):
-        page = b"""<!doctype html><html><head><title>Anime &amp; Manga News - MyAnimeList.net</title></head>
-        <body><div class="news-unit">
-          <a class="image-link" href="https://myanimelist.net/news/1">
-            <img src="https://cdn.example/cover-small.jpg"
-                 srcset="https://cdn.example/cover-small.jpg 1x, https://cdn.example/cover-large.jpg 2x">
-          </a>
-          <div class="news-unit-right"><p class="title"><a href="https://myanimelist.net/news/1">Anime announcement</a></p>
-          <div class="text">Official announcement details</div>
-          <div class="information"><p class="info">Today, 3:40 AM</p></div></div>
-        </div></body></html>"""
+    def test_html_extracts_headline_card_date_and_cover(self):
+        page = b"""<!doctype html><html><head><title>Example Site</title></head><body>
+        <ul class="headline-list"><li class="headline-item"><a href="/news/one">
+          <div class="headline-image"><img src="https://img.example/cover.jpg"></div>
+          <div class="headline-meta"><div class="headline-text">Anime announcement</div>
+          <div class="headline-date">2026-07-20 18:00</div></div>
+        </a></li></ul></body></html>"""
 
-        name, articles = _html_entries(page, "https://myanimelist.net/news", 10)
+        _name, articles = _html_entries(page, "https://example.com/", 10)
 
-        self.assertEqual(name, "MyAnimeList.net")
         self.assertEqual(len(articles), 1)
-        self.assertEqual(articles[0].cover_url, "https://cdn.example/cover-large.jpg")
-        self.assertEqual(articles[0].summary, "Official announcement details")
-
-    def test_html_extracts_chuapp_featured_cards(self):
-        page = b"""<!doctype html><html><head><title>ChuApp</title></head><body>
-        <section class="wrap"><div class="everyday"><div class="big">
-          <a href="/article/1.html"><img src="https://img.example/feature.jpg"><h2>ACG game announcement</h2><span>07.20</span></a>
-        </div></div></section></body></html>"""
-
-        name, articles = _html_entries(page, "https://www.chuapp.com/", 10)
-
-        self.assertEqual(name, "ChuApp")
-        self.assertEqual(len(articles), 1)
-        self.assertEqual(articles[0].url, "https://www.chuapp.com/article/1.html")
-        self.assertEqual(articles[0].cover_url, "https://img.example/feature.jpg")
+        self.assertEqual(articles[0].published_at, "2026-07-20 18:00")
+        self.assertEqual(articles[0].cover_url, "https://img.example/cover.jpg")
 
     def test_html_extracts_heading_wrapped_by_link(self):
         page = b"""<!doctype html><html><body><article>

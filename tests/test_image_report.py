@@ -6,6 +6,7 @@ from PIL import Image
 
 from acg_daily.image_report import build_daily_image_html, normalize_cover_data_uri
 from acg_daily.models import Article, DailyEdition, EditedItem
+from acg_daily.ranking import Ranking, RankingEntry
 
 
 class ImageReportTests(unittest.TestCase):
@@ -78,6 +79,21 @@ class ImageReportTests(unittest.TestCase):
         self.assertIn("漫画", html)
         self.assertIn("NO IMAGE / ACG DESK", html)
 
+    def test_report_uses_placeholder_for_ann_article_without_cover(self):
+        edition = DailyEdition("", [EditedItem(1, "游戏", "魔法少女的魔女审判原声带上线", "摘要", "")])
+        article = Article(
+            1,
+            "Magical Girl Witch Trials Soundtrack",
+            "",
+            "https://www.animenewsnetwork.com/press-release/example",
+            "Anime News Network",
+        )
+
+        html = build_daily_image_html(edition, [article], {}, "日期", "状态")
+
+        self.assertIn('class="cover-placeholder cover-placeholder-featured"', html)
+        self.assertNotIn('class="cover-image"', html)
+
     def test_report_renders_a_continued_page_with_global_item_numbers(self):
         article = Article(5, "原标题", "", "https://example.com", "来源")
         edition = DailyEdition("导语", [EditedItem(5, "游戏", "标题", "摘要", "")])
@@ -95,6 +111,20 @@ class ImageReportTests(unittest.TestCase):
 
         self.assertIn("续页 02 / 02", html)
         self.assertIn("05", html)
+
+    def test_report_renders_an_optional_top_ten_ranking(self):
+        ranking = Ranking(
+            "热门动画榜 Top 10",
+            "Anime Hack",
+            (RankingEntry(1, "《测试动画》", "2026年夏动画"),),
+        )
+
+        html = build_daily_image_html(DailyEdition("", []), [], {}, "日期", "状态", ranking=ranking)
+
+        self.assertIn('class="ranking-block"', html)
+        self.assertIn("热门动画榜 Top 10", html)
+        self.assertIn("Anime Hack", html)
+        self.assertIn("《测试动画》", html)
 
 
 if __name__ == "__main__":

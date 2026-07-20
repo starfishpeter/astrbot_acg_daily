@@ -236,6 +236,31 @@ def _first_image_url(value: object, source_url: str) -> str:
     return ""
 
 
+def _main_content_image_url(soup: BeautifulSoup, source_url: str) -> str:
+    """Find a likely article image in main content without accepting page chrome."""
+
+    main = soup.select_one("main")
+    if main is None:
+        return ""
+    excluded = re.compile(
+        r"(?:^|[-_\s])(?:ad|ads|advert(?:isement)?|banner|sponsor|promo|nav|menu|header|footer|sidebar)(?:$|[-_\s])",
+        re.IGNORECASE,
+    )
+    for image in main.find_all("img"):
+        ancestors = [image, *image.parents]
+        if any(
+            ancestor.name in {"nav", "aside", "header", "footer"}
+            or excluded.search(" ".join(ancestor.get("class", [])) + " " + str(ancestor.get("id", "")))
+            for ancestor in ancestors
+            if getattr(ancestor, "name", None)
+        ):
+            continue
+        url = _first_image_url(image, source_url)
+        if url:
+            return url
+    return ""
+
+
 def _article_page_cover_url(body: bytes, source_url: str) -> str:
     """Find a representative image from an article page before using a feed thumbnail."""
 
@@ -257,16 +282,18 @@ def _article_page_cover_url(body: bytes, source_url: str) -> str:
         "article",
         "main article",
         ".entry-content",
+        ".post-entry",
         ".post-content",
         ".article-content",
         ".article-body",
+        "figure",
     ):
         node = soup.select_one(selector)
         if node:
             url = _first_image_url(node, source_url)
             if url:
                 return url
-    return ""
+    return _main_content_image_url(soup, source_url)
 
 
 def _feed_cover_url(entry: object, source_url: str) -> str:
@@ -367,24 +394,26 @@ def _source_name(soup: BeautifulSoup, source_url: str) -> str:
     return urlsplit(source_url).hostname or source_url
 
 
+_TITLE_SELECTOR = (
+    "h1, h2, h3, h4, [class~='title'], [class~='headline'], [class~='heading'], "
+    "[class*='-title'], [class*='_title'], [class*='-headline'], [class*='_headline'], "
+    "[class*='-heading'], [class*='_heading'], [class*='headline-text'], "
+    "[class*='headline_text'], [class*='title-text'], [class*='title_text'], "
+    "[class*='heading-text'], [class*='heading_text']"
+)
+
+
 def _article_from_container(
     container,
     source_url: str,
     source_name: str,
 ) -> Article | None:
-    anchor = container.select_one(
-        "h1 a[href], h2 a[href], h3 a[href], h4 a[href], "
-        ".title a[href], .entry-title a[href], .post-title a[href]",
-    )
-    heading = anchor.find_parent(["h1", "h2", "h3", "h4"]) if anchor else None
-    if anchor is None:
+    heading = container.select_one(_TITLE_SELECTOR)
+    anchor = None
+    if heading is not None:
         # A visual card may wrap its heading in a link rather than put the
         # link inside it, for example ``<a><h2>Headline</h2></a>``.
-        heading = container.select_one(
-            "h1, h2, h3, h4, .title, .entry-title, .post-title",
-        )
-        if heading is not None:
-            anchor = heading.find_parent("a", href=True) or heading.select_one("a[href]")
+        anchor = heading.select_one("a[href]") or heading.find_parent("a", href=True)
     if anchor is None:
         return None
     title = clean_text(heading or anchor, 200)
@@ -410,7 +439,10 @@ def _article_from_container(
             80,
         )
     else:
-        info_node = container.select_one(".information .info, .byline, .date")
+        info_node = container.select_one(
+            ".information .info, .byline, .date, [class~='date'], [class~='published'], "
+            "[class*='-date'], [class*='_date'], [class*='-published'], [class*='_published']",
+        )
         published_at = clean_text(info_node, 80) if info_node else ""
     return Article(
         0,
@@ -426,24 +458,11 @@ def _article_from_container(
 def _html_entries(body: bytes, source_url: str, limit: int) -> tuple[str, list[Article]]:
     soup = BeautifulSoup(body, "html.parser")
     source_name = _source_name(soup, source_url)
-    hostname = (urlsplit(source_url).hostname or "").lower()
-    # ANN exposes complete, image-backed cards in .herald.box rather than
-    # semantic <article> elements. Restrict to its dated news stream to avoid
-    # reviews, episode listings, and duplicate navigation entries.
-    if hostname.endswith("animenewsnetwork.com"):
-        containers = soup.select(".mainfeed-day .herald.box.news")
-        if not containers:
-            containers = soup.select(".herald.box.news")
-    elif hostname.endswith("chuapp.com"):
-        # ChuApp uses visual modules rather than <article> elements. Keep its
-        # front-page feature and editorial cards, where the first image is the
-        # article cover and the first heading is the actual story headline.
-        containers = soup.select(".everyday > .big, .everyday > div, .news > ul > li")
-    else:
-        containers = soup.find_all("article")
+    containers = soup.find_all("article")
     if not containers:
         containers = soup.select(
-            ".news-item, .post, .post-item, .article-item, .news-unit, .herald.box",
+            "li, [class*='news'], [class*='post'], [class*='entry'], "
+            "[class*='article'], [class*='item'], [class*='card']",
         )
 
     articles: list[Article] = []
@@ -456,9 +475,11 @@ def _html_entries(body: bytes, source_url: str, limit: int) -> tuple[str, list[A
         if len(articles) >= limit:
             return source_name, articles
 
-    # Some sites have bare headline lists instead of article cards.
-    for heading in soup.find_all(["h2", "h3", "h4"]):
-        anchor = heading.find("a", href=True)
+    # Some sites have bare headline lists or visual cards instead of article
+    # elements. Common class-name fragments cover those structures without
+    # binding extraction to a publisher domain.
+    for heading in soup.select(_TITLE_SELECTOR):
+        anchor = heading.select_one("a[href]") or heading.find_parent("a", href=True)
         if anchor is None:
             continue
         link = canonical_url(urljoin(source_url, str(anchor.get("href", ""))))
@@ -642,8 +663,23 @@ class NewsScraper:
     ) -> tuple[str, bool]:
         cover_urls: list[tuple[str, bool]] = []
         last_error: Exception | None = None
-        try:
-            final_url, body, _content_type = await _read_source_response(session, article.url)
+        for attempt in range(2):
+            try:
+                final_url, body, _content_type = await _read_source_response(session, article.url)
+            except Exception as exc:
+                last_error = exc
+                logger.info(
+                    "ACG 日报：详情页抓取失败（%s｜%s，第 %d/2 次）：%s",
+                    article.source,
+                    article.title,
+                    attempt + 1,
+                    exc,
+                )
+                if attempt == 0:
+                    await asyncio.sleep(0.3)
+                continue
+
+            last_error = None
             detail_cover = _article_page_cover_url(body, final_url)
             if detail_cover:
                 cover_urls.append((detail_cover, True))
@@ -658,30 +694,27 @@ class NewsScraper:
                     article.source,
                     article.title,
                 )
-        except Exception as exc:
-            last_error = exc
-            logger.info(
-                "ACG 日报：详情页抓取失败，将尝试列表或订阅源封面（%s｜%s）：%s",
-                article.source,
-                article.title,
-                exc,
-            )
+            break
 
         if article.cover_url and article.cover_url not in {url for url, _is_detail in cover_urls}:
             cover_urls.append((article.cover_url, False))
         for cover_url, is_detail_cover in cover_urls:
-            try:
-                return await self._fetch_cover_image(session, cover_url), is_detail_cover
-            except Exception as exc:
-                last_error = exc
-                logger.info(
-                    "ACG 日报：封面候选下载失败（%s｜%s，%s，%s）：%s",
-                    article.source,
-                    article.title,
-                    "详情页" if is_detail_cover else "列表或订阅源",
-                    cover_url,
-                    exc,
-                )
+            for attempt in range(2):
+                try:
+                    return await self._fetch_cover_image(session, cover_url), is_detail_cover
+                except Exception as exc:
+                    last_error = exc
+                    logger.info(
+                        "ACG 日报：封面候选下载失败（%s｜%s，%s，%s，第 %d/2 次）：%s",
+                        article.source,
+                        article.title,
+                        "详情页" if is_detail_cover else "列表或订阅源",
+                        cover_url,
+                        attempt + 1,
+                        exc,
+                    )
+                    if attempt == 0:
+                        await asyncio.sleep(0.3)
 
         if last_error is not None:
             raise last_error

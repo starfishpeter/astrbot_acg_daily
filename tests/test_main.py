@@ -1,0 +1,35 @@
+import ast
+import unittest
+from pathlib import Path
+
+
+class MainSourceTests(unittest.TestCase):
+    def test_daily_item_limit_and_search_budget_are_twelve_and_ten(self):
+        source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        constants = [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)]
+
+        self.assertIn(12, constants)
+        self.assertIn(10, constants)
+        self.assertIn("max_steps=12", source)
+        self.assertIn("最多 10 次联网名称核对", source)
+
+    def test_scheduled_publish_uses_context_send_message_and_lifecycle_hooks(self):
+        source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
+        schedule_source = (Path(__file__).parent.parent / "acg_daily" / "schedule.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("async def initialize(self)", source)
+        self.assertIn("async def terminate(self)", source)
+        self.assertIn("parse_daily_publish_settings", source)
+        self.assertIn("self.context.send_message", source)
+        self.assertIn("_publish_scheduled_daily_to_group", source)
+        self.assertIn("message.url_image(image)", source)
+        self.assertIn("定时发布", source)
+        self.assertIn("daily_publish_group_whitelist", schedule_source)
+        self.assertIn("GroupMessage", schedule_source)
+
+
+if __name__ == "__main__":
+    unittest.main()

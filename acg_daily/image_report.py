@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 from .models import Article, DailyEdition, EditedItem
+from .ranking import Ranking
 
 
 TEMPLATE_DIR = Path(__file__).with_name("templates") / "visual_desk"
@@ -109,6 +110,25 @@ def _story_card(
     )
 
 
+def _ranking_block(ranking: Ranking | None) -> str:
+    if ranking is None:
+        return ""
+    rows = "".join(
+        "<li>"
+        f"<b>{entry.rank:02d}</b>"
+        f"<strong>{escape(_truncate(entry.title, 42))}</strong>"
+        f"<span>{escape(_truncate(entry.detail, 22))}</span>"
+        "</li>"
+        for entry in ranking.entries[:10]
+    )
+    return (
+        '<section class="ranking-block">'
+        '<div class="ranking-header"><span>RANKING SIGNAL</span>'
+        f"<h2>{escape(ranking.title)}</h2><p>{escape(ranking.source)}</p></div>"
+        f"<ol>{rows}</ol></section>"
+    )
+
+
 def build_daily_image_html(
     edition: DailyEdition,
     articles: list[Article],
@@ -118,6 +138,7 @@ def build_daily_image_html(
     page_number: int = 1,
     page_count: int = 1,
     page_start: int = 1,
+    ranking: Ranking | None = None,
 ) -> str:
     """Render one readable ACG news page from a theme and story-card template.
 
@@ -168,6 +189,7 @@ def build_daily_image_html(
         INTRO=escape(_truncate(intro, 78)),
         FEATURE=feature,
         STORIES=stories,
+        RANKING=_ranking_block(ranking),
         PAGE_LABEL=escape(continuation),
         PAGE_NUMBER=f"{page_number:02d}",
         PAGE_COUNT=f"{page_count:02d}",
