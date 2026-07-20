@@ -1,0 +1,44 @@
+{
+  "news_source_urls": {
+    "type": "list",
+    "description": "资讯源链接",
+    "hint": "每行填写一个 RSS/Atom 地址或新闻列表页 URL。执行 /acg日报 时会即时抓取所有链接。",
+    "default": []
+  },
+  "max_articles_per_source": {
+    "type": "int",
+    "description": "单来源最大候选数",
+    "hint": "每个来源最多提交给编辑模型的资讯数，建议 5-15。",
+    "default": 10
+  },
+  "max_candidates": {
+    "type": "int",
+    "description": "编辑前最大候选数",
+    "hint": "所有来源去重后最多交给模型的资讯数，避免上下文过长。",
+    "default": 40
+  },
+  "max_daily_items": {
+    "type": "int",
+    "description": "日报最大条数",
+    "hint": "AI 最多挑选多少条资讯，建议 5-8。",
+    "default": 7
+  },
+  "request_timeout_seconds": {
+    "type": "int",
+    "description": "单来源请求超时（秒）",
+    "hint": "超时来源会被跳过，建议 8-15。",
+    "default": 10
+  },
+  "cooldown_seconds": {
+    "type": "int",
+    "description": "同会话冷却时间（秒）",
+    "hint": "冷却时间内重复执行会复用刚生成的日报，避免重复抓取和模型调用。设为 0 可关闭。",
+    "default": 60
+  },
+  "node_name": {
+    "type": "string",
+    "description": "转发节点显示名称",
+    "hint": "QQ 合并转发中每个节点显示的发送者名称。",
+    "default": "ACG 日报"
+  }
+}
