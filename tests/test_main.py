@@ -13,6 +13,7 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("MAX_LOOKUP_GROUPS", source)
         self.assertIn("normalized_lookup_titles", source)
         self.assertIn("max_steps=3", source)
+        self.assertIn("tool_call_timeout=150", source)
         self.assertIn("一次批量译名核对", source)
         self.assertIn("_DEFAULT_EDITOR_SLOW_WARNING_SECONDS = 600", source)
         self.assertIn("_await_editor_response", source)
@@ -56,7 +57,7 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("但不会取消，将继续等待", source)
         self.assertIn("开始使用模型 %s 进行无工具重试", source)
         self.assertIn("编辑 Agent 已启动，正在等待模型首次响应", source)
-        self.assertIn("Tavily 未参与", source)
+        self.assertIn("尚未进入批量译名核对工具", source)
         self.assertIn("已跳过未经翻译的原始候选", source)
         self.assertNotIn("fallback_edition(articles, max_items)", source)
 

@@ -29,10 +29,13 @@ from .acg_daily.title_lookup import (
     MAX_BAIDU_LOOKUP_QUERY_CHARS,
     MAX_LOOKUP_GROUPS,
     compact_lookup_result,
+    format_bangumi_candidates,
+    lookup_bangumi_titles,
     lookup_search_arguments,
     lookup_title_groups,
     normalized_lookup_titles,
     run_lookup_groups,
+    unresolved_bangumi_titles,
 )
 
 
@@ -88,7 +91,7 @@ class DailyEditorHooks(BaseAgentRunHooks):
         if self.tool_call_count == 0:
             return (
                 f"Agent 已运行 {elapsed:.1f} 秒但未完成，未进入任何联网工具调用；"
-                "Tavily 未参与。当前只能定位到 Agent 预处理或模型首次响应等待阶段，"
+                "尚未进入批量译名核对工具。当前只能定位到 Agent 预处理或模型首次响应等待阶段，"
                 "请结合 AstrBot Core 的模型提供商请求日志判断网络连接或上游模型响应情况。"
             )
         return (
@@ -98,15 +101,16 @@ class DailyEditorHooks(BaseAgentRunHooks):
 
 
 class BatchTitleLookupTool(FunctionTool):
-    """Perform a few compact title searches in one model-visible tool action."""
+    """Prefer Bangumi candidates and use web search only for unresolved titles."""
 
-    def __init__(self, tool: FunctionTool) -> None:
+    def __init__(self, search_tool: FunctionTool | None, bangumi_access_token: str, timeout_seconds: int) -> None:
         super().__init__(
             name="batch_title_lookup",
             description=(
                 "一次性核对多个动画、漫画、轻小说、游戏作品的中国大陆常用中文译名。"
-                "仅在确实不确定译名时调用一次；titles 中列出全部需要核对的外文作品名，"
-                "不要逐条使用其他搜索工具。"
+                "仅在确实不确定译名时调用一次；titles 中列出全部需要核对的外文作品名。"
+                "工具优先返回 Bangumi 的多个中文词条候选，由你结合新闻上下文判断；"
+                "仅无中文候选的标题才可能使用网页搜索兜底。"
             ),
             parameters={
                 "type": "object",
@@ -120,16 +124,18 @@ class BatchTitleLookupTool(FunctionTool):
                 "required": ["titles"],
             },
         )
-        self._tool = tool
+        self._search_tool = search_tool
+        self._bangumi_access_token = bangumi_access_token
+        self._timeout_seconds = timeout_seconds
         self._called = False
-        self.active = tool.active
+        self.active = search_tool.active if search_tool is not None else True
 
     async def call(self, context, **kwargs):
         if self._called:
             logger.warning("ACG 日报：已阻止重复的批量译名核对，请基于已有结果完成编辑。")
             return "本次日报已经完成一次批量译名核对，不能再次搜索。请基于候选资讯和已有搜索结果完成编辑。"
         self._called = True
-        baidu_search = self._tool.name == "web_search_baidu"
+        baidu_search = self._search_tool is not None and self._search_tool.name == "web_search_baidu"
         titles = normalized_lookup_titles(
             kwargs.get("titles"),
             MAX_BAIDU_LOOKUP_QUERY_CHARS if baidu_search else 120,
@@ -137,26 +143,41 @@ class BatchTitleLookupTool(FunctionTool):
         if not titles:
             return "没有收到可核对的作品名。请直接完成日报编辑。"
 
+        bangumi_matches = {}
+        if self._bangumi_access_token:
+            bangumi_matches = await lookup_bangumi_titles(titles, self._bangumi_access_token, self._timeout_seconds)
+            matched_count = sum(1 for candidates in bangumi_matches.values() if candidates)
+            logger.info("ACG 日报：Bangumi 已返回 %d/%d 个作品名的中文词条候选。", matched_count, len(titles))
+
+        unresolved_titles = unresolved_bangumi_titles(titles, bangumi_matches)
+        bangumi_result = format_bangumi_candidates(bangumi_matches)
+        if not unresolved_titles:
+            return bangumi_result or "Bangumi 未返回可用中文词条候选。请使用已有知识完成翻译。"
+        if self._search_tool is None:
+            if bangumi_result:
+                return bangumi_result + "\n\n以下作品未获得 Bangumi 中文候选，请使用已有知识完成翻译：" + "；".join(unresolved_titles)
+            return "Bangumi 未返回可用中文词条候选，且网页搜索未启用。请使用已有知识完成翻译。"
+
         groups = lookup_title_groups(
-            titles,
+            unresolved_titles,
             MAX_BAIDU_LOOKUP_QUERY_CHARS if baidu_search else 420,
         )
         logger.info(
-            "ACG 日报：批量译名核对收到 %d 个作品名，将以 %d 个并发搜索组完成。",
-            len(titles),
+            "ACG 日报：Bangumi 未覆盖 %d 个作品名，将以 %d 个并发网页搜索组兜底。",
+            len(unresolved_titles),
             len(groups),
         )
         searched_title_count = sum(len(group) for group in groups)
-        if searched_title_count < len(titles):
+        if searched_title_count < len(unresolved_titles):
             logger.warning(
                 "ACG 日报：批量译名核对最多允许 %d 个搜索组，将跳过 %d 个较低优先级标题。",
                 MAX_LOOKUP_GROUPS,
-                len(titles) - searched_title_count,
-        )
+                len(unresolved_titles) - searched_title_count,
+            )
         async def search_group(group: list[str]) -> object:
-            return await self._tool.call(
+            return await self._search_tool.call(
                 context,
-                **lookup_search_arguments(group, self._tool.name, self._tool.parameters),
+                **lookup_search_arguments(group, self._search_tool.name, self._search_tool.parameters),
             )
 
         results = await run_lookup_groups(groups, search_group)
@@ -171,8 +192,9 @@ class BatchTitleLookupTool(FunctionTool):
             len(groups),
         )
         if not usable:
-            return "批量译名核对未获得可用结果。请使用已有知识完成翻译，不要再次搜索。"
-        return "批量译名核对结果（仅用于作品名翻译，请勿据此补充新闻事实）：\n" + "\n\n".join(usable)
+            return (bangumi_result + "\n\n" if bangumi_result else "") + "网页搜索未获得可用结果。请使用已有知识完成翻译，不要再次搜索。"
+        web_result = "网页搜索兜底结果（仅用于未获 Bangumi 中文候选的作品名翻译，请勿据此补充新闻事实）：\n" + "\n\n".join(usable)
+        return (bangumi_result + "\n\n" if bangumi_result else "") + web_result
 
 class AcgDailyPlugin(Star):
     """Use /acg日报 to create an AI-edited ACG image digest."""
@@ -542,7 +564,8 @@ class AcgDailyPlugin(Star):
                         prompt=prompt,
                         tools=search_tools,
                         max_steps=3,
-                        tool_call_timeout=30,
+                        # Bangumi may need four bounded request waves plus one web-search fallback.
+                        tool_call_timeout=150,
                         agent_hooks=agent_hooks,
                     ),
                     "带联网工具的编辑",
@@ -617,9 +640,24 @@ class AcgDailyPlugin(Star):
             return DailyEdition("编辑模型未返回合规的日报内容，本次未展示未经翻译的原始候选。", []), None
 
     def _search_tools(self, event: AstrMessageEvent) -> ToolSet | None:
-        if not self.config.get("enable_web_search", False):
+        configured_token = self.config.get("bangumi_access_token", "")
+        bangumi_access_token = configured_token.strip() if isinstance(configured_token, str) else ""
+        search_tool = self._configured_web_search_tool(event) if self.config.get("enable_web_search", False) else None
+        if not bangumi_access_token and search_tool is None:
             return None
+        if bangumi_access_token:
+            logger.info("ACG 日报：已为编辑模型启用 Bangumi 中文词条候选核对。")
+        return ToolSet(
+            [
+                BatchTitleLookupTool(
+                    search_tool,
+                    bangumi_access_token,
+                    int(self.config.get("request_timeout_seconds", 10)),
+                )
+            ]
+        )
 
+    def _configured_web_search_tool(self, event: AstrMessageEvent) -> FunctionTool | None:
         provider_settings = self.context.get_config(event.unified_msg_origin).get(
             "provider_settings",
             {},
@@ -647,8 +685,8 @@ class AcgDailyPlugin(Star):
         except (KeyError, TypeError) as exc:
             logger.warning("ACG 日报：无法加载网页搜索工具「%s」：%s", tool_name, exc)
             return None
-        logger.info("ACG 日报：已为编辑模型注入一次性批量译名核对工具，底层搜索提供商为「%s」。", tool_name)
-        return ToolSet([BatchTitleLookupTool(tool)])
+        logger.info("ACG 日报：网页搜索将仅作为 Bangumi 未覆盖标题的兜底，提供商为「%s」。", tool_name)
+        return tool
 
     async def _prepare_cover_images(self, covers: dict[int, str]) -> dict[int, str]:
         """Adapt downloaded covers for Chromium before putting them in HTML."""

@@ -3,12 +3,28 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+
+import aiohttp
 
 
 MAX_LOOKUP_TITLES = 20
 MAX_LOOKUP_GROUPS = 3
 MAX_LOOKUP_QUERY_CHARS = 420
 MAX_BAIDU_LOOKUP_QUERY_CHARS = 67
+MAX_BANGUMI_CONCURRENCY = 5
+MAX_BANGUMI_RESULTS_PER_TITLE = 3
+_BANGUMI_SEARCH_URL = "https://api.bgm.tv/v0/search/subjects"
+_BANGUMI_SUBJECT_TYPES = (1, 2, 4)
+_BANGUMI_TYPE_LABELS = {1: "书籍/漫画", 2: "动画", 4: "游戏"}
+
+
+@dataclass(frozen=True)
+class BangumiCandidate:
+    name: str
+    name_cn: str
+    subject_type: int
+    date: str
 
 
 def normalized_lookup_titles(value: object, max_title_chars: int = 120) -> list[str]:
@@ -74,6 +90,108 @@ async def run_lookup_groups(
         *(search_group(group) for group in groups),
         return_exceptions=True,
     )
+
+
+def parse_bangumi_candidates(payload: object) -> list[BangumiCandidate]:
+    """Keep only concise Bangumi candidates that provide a Chinese title."""
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        return []
+    candidates: list[BangumiCandidate] = []
+    for subject in data:
+        if not isinstance(subject, dict):
+            continue
+        name = " ".join(str(subject.get("name", "")).split())[:160]
+        name_cn = " ".join(str(subject.get("name_cn", "")).split())[:160]
+        subject_type = subject.get("type")
+        if not name or not name_cn or not isinstance(subject_type, int):
+            continue
+        if subject_type not in _BANGUMI_SUBJECT_TYPES:
+            continue
+        candidate = BangumiCandidate(
+            name=name,
+            name_cn=name_cn,
+            subject_type=subject_type,
+            date=" ".join(str(subject.get("date", "")).split())[:20],
+        )
+        if candidate not in candidates:
+            candidates.append(candidate)
+        if len(candidates) >= MAX_BANGUMI_RESULTS_PER_TITLE:
+            break
+    return candidates
+
+
+def format_bangumi_candidates(matches: dict[str, list[BangumiCandidate]]) -> str:
+    """Return compact candidate names for the editor, never API payloads or tokens."""
+
+    lines = ["Bangumi 词条候选（请结合新闻上下文选择合适译名；同名候选不代表同一作品）："]
+    for query, candidates in matches.items():
+        if not candidates:
+            continue
+        lines.append(f"- 查询「{query}」：")
+        for candidate in candidates:
+            kind = _BANGUMI_TYPE_LABELS[candidate.subject_type]
+            date = f"；{candidate.date}" if candidate.date else ""
+            lines.append(f"  - [{kind}] {candidate.name} -> {candidate.name_cn}{date}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def unresolved_bangumi_titles(titles: list[str], matches: dict[str, list[BangumiCandidate]]) -> list[str]:
+    """Only titles with no Chinese candidate need a web-search fallback."""
+
+    return [title for title in titles if not matches.get(title)]
+
+
+def bangumi_search_request(title: str, access_token: str) -> tuple[str, dict[str, str], dict[str, object]]:
+    """Build the request without exposing the token to editor-visible data."""
+
+    return (
+        _BANGUMI_SEARCH_URL,
+        {
+            "Accept": "application/json",
+            "User-Agent": "astrbot-plugin-acg-daily",
+            "Authorization": f"Bearer {access_token}",
+        },
+        {"keyword": title, "filter": {"type": list(_BANGUMI_SUBJECT_TYPES)}, "limit": 5},
+    )
+
+
+async def run_bangumi_lookups(
+    titles: list[str],
+    lookup_title: Callable[[str], Awaitable[list[BangumiCandidate]]],
+) -> dict[str, list[BangumiCandidate]]:
+    """Query independent titles concurrently while treating failed lookups as unresolved."""
+
+    semaphore = asyncio.Semaphore(MAX_BANGUMI_CONCURRENCY)
+
+    async def lookup(title: str) -> tuple[str, list[BangumiCandidate]]:
+        try:
+            async with semaphore:
+                return title, await lookup_title(title)
+        except Exception:
+            return title, []
+
+    return dict(await asyncio.gather(*(lookup(title) for title in titles)))
+
+
+async def lookup_bangumi_titles(
+    titles: list[str],
+    access_token: str,
+    timeout_seconds: int,
+) -> dict[str, list[BangumiCandidate]]:
+    """Search Bangumi across books, animation, and games for Chinese title candidates."""
+
+    timeout = aiohttp.ClientTimeout(total=max(1, min(timeout_seconds, 30)))
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+
+        async def lookup_title(title: str) -> list[BangumiCandidate]:
+            url, headers, payload = bangumi_search_request(title, access_token)
+            async with session.post(url, headers=headers, json=payload) as response:
+                response.raise_for_status()
+                return parse_bangumi_candidates(await response.json())
+
+        return await run_bangumi_lookups(titles, lookup_title)
 
 
 def compact_lookup_result(result: object) -> str:
