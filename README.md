@@ -5,12 +5,13 @@
 ## 功能
 
 - 配置页只需要维护资讯源 URL 列表，不要求填写 RSS 类型、来源名称或 CSS 选择器。
-- 自动优先识别 RSS/Atom；非订阅链接会按常见新闻列表页结构提取 `article`、标题、摘要和时间。
+- 同时支持新闻首页、新闻列表页和 RSS/Atom。能稳定直接抓取的页面会提取列表封面和摘要；RSS/Atom 用于页面受限时的可靠补充。
 - 多来源并发抓取，单来源失败不会中断日报。
 - 清除 URL 跟踪参数，按原文链接和相似标题去重。
 - 使用当前聊天会话的 AstrBot LLM，将海外、日文、繁体中文等来源整理为适合中国大陆 ACG 群聊阅读的简体中文。
 - 只接受模型返回的受校验 JSON；原始来源和链接始终由插件回填，模型不能伪造出处。
-- 使用 AstrBot 的 HTML 文转图服务输出一张图文日报；优先使用资讯源提供的封面图，缺少封面时自动使用文字卡片。
+- 使用 AstrBot 的 HTML 文转图服务输出一张编辑部画报风格的图文日报：首条主推大图，其余条目双列封面卡。
+- 对 AI 入选资讯会再次请求原文详情页，优先提取 Open Graph 封面或正文首图；缺少封面时自动使用分类视觉卡片。
 - 图片只标注资讯来源，不显示原文链接。
 - 拒绝 `localhost`、私网 IP 和非 HTTP(S) 资讯源，避免配置链接被用于访问机器人所在机器的内部服务。
 
@@ -26,19 +27,21 @@ https://github.com/starfishpeter/astrbot_acg_daily
 
 ## 配置
 
-安装后在插件配置中找到“资讯源链接”。每行填写一个 `https://` URL。推荐以更新稳定、覆盖面互补的订阅源开始：
+安装后在插件配置中找到“资讯源链接”。每行填写一个 `https://` URL。建议同时保留可稳定提取的新闻页面与官方 RSS，前者通常有列表摘要，后者在页面结构变化或访问受限时更可靠：
 
 ```text
+# 已验证的新闻页面：列表页直接有封面和摘要
+https://animeuknews.net/
+https://www.chuapp.com/
+
+# 已验证的 RSS：页面受限时的可靠补充
+https://myanimelist.net/rss/news.xml
 https://ln-news.com/feed
-https://animeanime.jp/rss/index.rdf
-https://hobby.dengeki.com/feed/
 https://animecorner.me/feed/
-https://www.animeherald.com/feed/
-https://animeuknews.net/feed/
-https://www.chuapp.com/feed/
+https://hobby.dengeki.com/feed/
 ```
 
-其中轻小说新闻、模型资讯和部分英文 RSS 会直接提供封面图；其他来源仍可用于日报，图片会自动退化为分类文字卡片。RSS/Atom 地址通常最稳定。普通新闻列表页也可以添加，插件会尝试通用抽取；网页主要依赖 JavaScript 渲染、登录、验证码或严格反爬时，可能无法提取到资讯。
+`Anime UK News` 与 `触乐` 的页面结构会直接给出缩略图和摘要，适合图片日报。`MyAnimeList`、`Anime Corner` 与 `电击 Hobby` 建议使用 RSS；入选后插件仍会访问原文详情页补全封面。实测中 `Anime Herald`、`AnimeAnime` 的响应不够稳定，Anime News Network 在部分服务器网络下会返回 `403`，因此暂不建议作为默认来源。网页主要依赖 JavaScript 渲染、登录、验证码或严格反爬时，仍可能无法提取到资讯。
 
 其余配置项用于控制单来源候选数、送入模型前的最大候选数、日报最大条数、请求超时和短时间重复调用的冷却时间。
 
@@ -63,6 +66,7 @@ https://www.chuapp.com/feed/
   -> 清洗、去重、限制候选数量
   -> 当前会话 LLM 筛选、翻译、润色、排序
   -> 校验 JSON 选择结果
+  -> 请求入选文章详情页补全 Open Graph/正文封面
   -> HTML/CSS 渲染为单张图片
 ```
 
@@ -84,7 +88,7 @@ https://www.chuapp.com/feed/
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖 RSS/Atom 与普通 HTML 列表抽取、封面发现、去重、链接清洗、内网地址拒绝、模型 JSON 校验和图片日报 HTML 转义。
+测试覆盖 RSS/Atom 与普通 HTML 列表抽取、MyAnimeList/ANN/触乐页面适配、详情页 Open Graph 封面发现、去重与来源轮转、链接清洗、内网地址拒绝、模型 JSON 校验和图片日报 HTML 转义。
 
 ## 已知边界
 

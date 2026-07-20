@@ -203,11 +203,65 @@ def _image_url(value: object, source_url: str) -> str:
     return url if is_http_url(url) else ""
 
 
+def _srcset_image_url(value: object, source_url: str) -> str:
+    """Return the largest usable candidate from an image srcset attribute."""
+
+    candidates = str(value or "").split(",")
+    for candidate in reversed(candidates):
+        url = _image_url(candidate.strip().split(" ", 1)[0], source_url)
+        if url:
+            return url
+    return ""
+
+
 def _first_image_url(value: object, source_url: str) -> str:
     soup = BeautifulSoup(str(value or ""), "html.parser")
-    for image in soup.find_all("img"):
-        for attribute in ("src", "data-src", "data-lazy-src"):
-            url = _image_url(image.get(attribute), source_url)
+    for node in soup.find_all(True):
+        for attribute in ("srcset", "data-srcset"):
+            url = _srcset_image_url(node.get(attribute), source_url)
+            if url:
+                return url
+        for attribute in (
+            "src",
+            "data-src",
+            "data-lazy-src",
+            "data-original",
+            "data-image",
+        ):
+            url = _image_url(node.get(attribute), source_url)
+            if url:
+                return url
+    return ""
+
+
+def _article_page_cover_url(body: bytes, source_url: str) -> str:
+    """Find a representative image from an article page before using a feed thumbnail."""
+
+    soup = BeautifulSoup(body, "html.parser")
+    for attrs in (
+        {"property": "og:image"},
+        {"property": "og:image:url"},
+        {"name": "twitter:image"},
+        {"name": "twitter:image:src"},
+        {"itemprop": "image"},
+    ):
+        node = soup.find("meta", attrs=attrs)
+        if node:
+            url = _image_url(node.get("content"), source_url)
+            if url:
+                return url
+
+    for selector in (
+        "article",
+        "main article",
+        ".entry-content",
+        ".post-content",
+        ".article-content",
+        ".article-body",
+    ):
+        node = soup.select_one(selector)
+        if node:
+            url = _first_image_url(node, source_url)
             if url:
                 return url
     return ""
@@ -260,6 +314,8 @@ def _feed_entries(body: bytes, source_url: str, limit: int) -> tuple[str, list[A
 
     feed_info = getattr(feed, "feed", {})
     source_name = clean_text(_feed_value(feed_info, "title"), 100)
+    source_name = re.sub(r"^(?:news|feed)\s*[-|]\s*", "", source_name, flags=re.IGNORECASE)
+    source_name = re.sub(r"\s*[-|]\s*(?:rss|atom)\s*feed\s*$", "", source_name, flags=re.IGNORECASE)
     source_name = source_name or urlsplit(source_url).hostname or source_url
     articles: list[Article] = []
     for entry in entries[:limit]:
@@ -314,10 +370,19 @@ def _article_from_container(
     source_url: str,
     source_name: str,
 ) -> Article | None:
-    heading = container.find(["h1", "h2", "h3", "h4"])
-    anchor = heading.find("a", href=True) if heading else None
+    anchor = container.select_one(
+        "h1 a[href], h2 a[href], h3 a[href], h4 a[href], "
+        ".title a[href], .entry-title a[href], .post-title a[href]",
+    )
+    heading = anchor.find_parent(["h1", "h2", "h3", "h4"]) if anchor else None
     if anchor is None:
-        anchor = container.find("a", href=True)
+        # A visual card may wrap its heading in a link rather than put the
+        # link inside it, for example ``<a><h2>Headline</h2></a>``.
+        heading = container.select_one(
+            "h1, h2, h3, h4, .title, .entry-title, .post-title",
+        )
+        if heading is not None:
+            anchor = heading.find_parent("a", href=True) or heading.select_one("a[href]")
     if anchor is None:
         return None
     title = clean_text(heading or anchor, 200)
@@ -325,8 +390,14 @@ def _article_from_container(
     if not title or not link:
         return None
 
-    summary_parts = [clean_text(node, 350) for node in container.find_all("p")[:2]]
-    summary = clean_text(" ".join(part for part in summary_parts if part), 700)
+    summary_node = container.select_one(
+        ".snippet .hook, .entry-summary, .entry-excerpt, .excerpt, .summary, .text",
+    )
+    if summary_node is not None:
+        summary = clean_text(summary_node, 700)
+    else:
+        summary_parts = [clean_text(node, 350) for node in container.find_all("p")[:2]]
+        summary = clean_text(" ".join(part for part in summary_parts if part), 700)
     if summary == title:
         summary = ""
     time_node = container.find("time")
@@ -336,6 +407,9 @@ def _article_from_container(
             time_node.get("datetime") or time_node.get_text(" ", strip=True),
             80,
         )
+    else:
+        info_node = container.select_one(".information .info, .byline, .date")
+        published_at = clean_text(info_node, 80) if info_node else ""
     return Article(
         0,
         title,
@@ -350,10 +424,24 @@ def _article_from_container(
 def _html_entries(body: bytes, source_url: str, limit: int) -> tuple[str, list[Article]]:
     soup = BeautifulSoup(body, "html.parser")
     source_name = _source_name(soup, source_url)
-    containers = soup.find_all("article")
+    hostname = (urlsplit(source_url).hostname or "").lower()
+    # ANN exposes complete, image-backed cards in .herald.box rather than
+    # semantic <article> elements. Restrict to its dated news stream to avoid
+    # reviews, episode listings, and duplicate navigation entries.
+    if hostname.endswith("animenewsnetwork.com"):
+        containers = soup.select(".mainfeed-day .herald.box.news")
+        if not containers:
+            containers = soup.select(".herald.box.news")
+    elif hostname.endswith("chuapp.com"):
+        # ChuApp uses visual modules rather than <article> elements. Keep its
+        # front-page feature and editorial cards, where the first image is the
+        # article cover and the first heading is the actual story headline.
+        containers = soup.select(".everyday > .big, .everyday > div, .news > ul > li")
+    else:
+        containers = soup.find_all("article")
     if not containers:
         containers = soup.select(
-            ".news-item, .post, .post-item, .article-item, .news-unit",
+            ".news-item, .post, .post-item, .article-item, .news-unit, .herald.box",
         )
 
     articles: list[Article] = []
@@ -409,7 +497,7 @@ def deduplicate_articles(
     articles: Iterable[Article],
     max_candidates: int,
 ) -> list[Article]:
-    """Deduplicate URL/title matches and assign stable IDs for the editor."""
+    """Deduplicate and interleave sources so one fast publisher cannot dominate."""
 
     unique: list[Article] = []
     seen_urls: set[str] = set()
@@ -425,6 +513,23 @@ def deduplicate_articles(
         unique.append(article)
         if len(unique) >= max_candidates:
             break
+    by_source: dict[str, list[Article]] = {}
+    for item in unique:
+        by_source.setdefault(item.source, []).append(item)
+
+    balanced: list[Article] = []
+    while len(balanced) < max_candidates:
+        added = False
+        for source in by_source:
+            if not by_source[source]:
+                continue
+            balanced.append(by_source[source].pop(0))
+            added = True
+            if len(balanced) >= max_candidates:
+                break
+        if not added:
+            break
+
     return [
         Article(
             index,
@@ -435,7 +540,7 @@ def deduplicate_articles(
             item.published_at,
             item.cover_url,
         )
-        for index, item in enumerate(unique, start=1)
+        for index, item in enumerate(balanced, start=1)
     ]
 
 
@@ -486,14 +591,17 @@ class NewsScraper:
         return normalized
 
     async def fetch_cover_images(self, articles: list[Article]) -> dict[int, str]:
-        """Download selected article covers as safe, bounded data URLs for T2I."""
+        """Fetch selected article pages and download their best safe cover image."""
 
-        candidates = [article for article in articles if article.cover_url]
-        if not candidates:
+        if not articles:
             return {}
 
+        logger.info("ACG 日报：开始从 %d 条入选资讯的详情页补全封面。", len(articles))
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
-        headers = {"User-Agent": USER_AGENT, "Accept": "image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8"}
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8",
+        }
         connector = aiohttp.TCPConnector(resolver=PublicAddressResolver())
         async with aiohttp.ClientSession(
             timeout=timeout,
@@ -501,24 +609,87 @@ class NewsScraper:
             connector=connector,
         ) as session:
             images = await asyncio.gather(
-                *(self._fetch_cover_image(session, article) for article in candidates),
+                *(self._fetch_article_cover_image(session, article) for article in articles),
                 return_exceptions=True,
             )
 
         result: dict[int, str] = {}
-        for article, image in zip(candidates, images):
-            if isinstance(image, str) and image:
-                result[article.id] = image
+        detail_page_covers = 0
+        fallback_covers = 0
+        for article, image in zip(articles, images):
+            if isinstance(image, tuple):
+                result[article.id] = image[0]
+                if image[1]:
+                    detail_page_covers += 1
+                else:
+                    fallback_covers += 1
             elif isinstance(image, Exception):
                 logger.info("ACG 日报：未使用资讯封面（%s）：%s", article.source, image)
+        logger.info(
+            "ACG 日报：封面补全完成，详情页封面 %d 张，列表或订阅源回退封面 %d 张，缺失 %d 张。",
+            detail_page_covers,
+            fallback_covers,
+            len(articles) - len(result),
+        )
         return result
+
+    async def _fetch_article_cover_image(
+        self,
+        session: aiohttp.ClientSession,
+        article: Article,
+    ) -> tuple[str, bool]:
+        cover_urls: list[tuple[str, bool]] = []
+        last_error: Exception | None = None
+        try:
+            final_url, body, _content_type = await _read_source_response(session, article.url)
+            detail_cover = _article_page_cover_url(body, final_url)
+            if detail_cover:
+                cover_urls.append((detail_cover, True))
+                logger.info(
+                    "ACG 日报：详情页找到封面候选（%s｜%s）。",
+                    article.source,
+                    article.title,
+                )
+            else:
+                logger.info(
+                    "ACG 日报：详情页未找到封面候选，将尝试列表或订阅源封面（%s｜%s）。",
+                    article.source,
+                    article.title,
+                )
+        except Exception as exc:
+            last_error = exc
+            logger.info(
+                "ACG 日报：详情页抓取失败，将尝试列表或订阅源封面（%s｜%s）：%s",
+                article.source,
+                article.title,
+                exc,
+            )
+
+        if article.cover_url and article.cover_url not in {url for url, _is_detail in cover_urls}:
+            cover_urls.append((article.cover_url, False))
+        for cover_url, is_detail_cover in cover_urls:
+            try:
+                return await self._fetch_cover_image(session, cover_url), is_detail_cover
+            except Exception as exc:
+                last_error = exc
+                logger.info(
+                    "ACG 日报：封面候选下载失败（%s｜%s，%s，%s）：%s",
+                    article.source,
+                    article.title,
+                    "详情页" if is_detail_cover else "列表或订阅源",
+                    cover_url,
+                    exc,
+                )
+
+        if last_error is not None:
+            raise last_error
+        raise ValueError("article page and source entry do not provide a usable cover")
 
     async def _fetch_cover_image(
         self,
         session: aiohttp.ClientSession,
-        article: Article,
+        current_url: str,
     ) -> str:
-        current_url = article.cover_url
         for _ in range(MAX_REDIRECTS + 1):
             await validate_source_url(current_url)
             async with session.get(current_url, allow_redirects=False) as response:
@@ -529,15 +700,24 @@ class NewsScraper:
                     current_url = urljoin(current_url, location)
                     continue
                 if response.status != 200:
-                    raise ValueError(f"cover HTTP {response.status}")
+                    raise ValueError(f"cover HTTP {response.status} ({current_url})")
                 content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
                 if content_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
-                    raise ValueError("cover response is not a supported image")
+                    length = response.content_length if response.content_length is not None else "unknown"
+                    raise ValueError(
+                        "cover response has unsupported type "
+                        f"{content_type or 'unknown'} ({length} bytes, {current_url})",
+                    )
                 if response.content_length is not None and response.content_length > MAX_IMAGE_BYTES:
-                    raise ValueError("cover exceeds the 1 MiB limit")
+                    raise ValueError(
+                        "cover is "
+                        f"{response.content_length} bytes and exceeds the 1 MiB limit ({current_url})",
+                    )
                 body = await response.content.read(MAX_IMAGE_BYTES + 1)
                 if len(body) > MAX_IMAGE_BYTES:
-                    raise ValueError("cover exceeds the 1 MiB limit")
+                    raise ValueError(
+                        f"cover exceeds the 1 MiB limit ({len(body)} bytes read, {current_url})",
+                    )
                 encoded = base64.b64encode(body).decode("ascii")
                 return f"data:{content_type};base64,{encoded}"
         raise ValueError("too many cover redirects")
@@ -557,7 +737,12 @@ class NewsScraper:
                     final_url,
                     self.max_articles_per_source,
                 )
-                if not articles:
+                response_type = content_type.split(";", 1)[0].lower()
+                looks_like_html = (
+                    response_type in {"text/html", "application/xhtml+xml"}
+                    or bool(re.search(br"<html(?:\s|>)", body[:4096], flags=re.IGNORECASE))
+                )
+                if not articles and looks_like_html:
                     source_name, articles = _html_entries(
                         body,
                         final_url,
@@ -565,8 +750,7 @@ class NewsScraper:
                     )
                 if articles:
                     return SourceResult(source_url, source_name, articles)
-                response_type = content_type.split(";", 1)[0] or "unknown"
-                error = f"no articles found (response {response_type}, {len(body)} bytes)"
+                error = f"no articles found (response {response_type or 'unknown'}, {len(body)} bytes)"
             except Exception as exc:
                 error = str(exc) or type(exc).__name__
 

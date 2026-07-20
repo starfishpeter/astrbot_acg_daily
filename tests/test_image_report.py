@@ -35,6 +35,7 @@ class ImageReportTests(unittest.TestCase):
         )
 
         self.assertIn('src="data:image/jpeg;base64,aGVsbG8="', html)
+        self.assertIn('class="lead-story"', html)
         self.assertIn("Example &lt;Source&gt;", html)
         self.assertIn("A &lt; B", html)
         self.assertIn("Summary &amp; detail", html)
@@ -47,8 +48,9 @@ class ImageReportTests(unittest.TestCase):
 
         html = build_daily_image_html(edition, [article], {}, "日期", "状态")
 
-        self.assertIn('class="cover-placeholder"', html)
+        self.assertIn('class="cover-placeholder cover-placeholder-featured"', html)
         self.assertIn("漫画", html)
+        self.assertIn("ACG NEWS", html)
 
 
 if __name__ == "__main__":
