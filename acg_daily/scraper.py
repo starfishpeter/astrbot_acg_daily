@@ -547,26 +547,36 @@ class NewsScraper:
         session: aiohttp.ClientSession,
         source_url: str,
     ) -> SourceResult:
-        try:
-            final_url, body, _content_type = await _read_source_response(session, source_url)
-            source_name, articles = _feed_entries(
-                body,
-                final_url,
-                self.max_articles_per_source,
-            )
-            if not articles:
-                source_name, articles = _html_entries(
+        source_name = source_url
+        error = ""
+        for attempt in range(2):
+            try:
+                final_url, body, content_type = await _read_source_response(session, source_url)
+                source_name, articles = _feed_entries(
                     body,
                     final_url,
                     self.max_articles_per_source,
                 )
-            if not articles:
-                return SourceResult(source_url, source_name or source_url, [], "no articles found")
-            return SourceResult(source_url, source_name, articles)
-        except Exception as exc:
-            return SourceResult(
-                source_url,
-                urlsplit(source_url).hostname or source_url,
-                [],
-                str(exc),
-            )
+                if not articles:
+                    source_name, articles = _html_entries(
+                        body,
+                        final_url,
+                        self.max_articles_per_source,
+                    )
+                if articles:
+                    return SourceResult(source_url, source_name, articles)
+                response_type = content_type.split(";", 1)[0] or "unknown"
+                error = f"no articles found (response {response_type}, {len(body)} bytes)"
+            except Exception as exc:
+                error = str(exc) or type(exc).__name__
+
+            if attempt == 0:
+                logger.info("ACG 日报：资讯源首次未提取到条目，将重试（%s）：%s", source_url, error)
+                await asyncio.sleep(0.5)
+
+        return SourceResult(
+            source_url,
+            source_name or urlsplit(source_url).hostname or source_url,
+            [],
+            error,
+        )

@@ -64,6 +64,25 @@ class ScraperTests(unittest.TestCase):
         self.assertEqual(len(articles), 1)
         self.assertEqual(articles[0].title, "Anime announcement")
 
+    def test_rdf_rss_matches_animeanime_structure(self):
+        rdf_rss = b"""<?xml version="1.0" encoding="utf-8"?>
+        <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+          xmlns:dc="http://purl.org/dc/elements/1.1/"
+          xmlns="http://purl.org/rss/1.0/">
+          <channel rdf:about="https://animeanime.jp/"><title>Anime Anime</title></channel>
+          <item rdf:about="https://animeanime.jp/article/2026/07/20/1.html">
+            <title>Anime announcement</title>
+            <link>https://animeanime.jp/article/2026/07/20/1.html</link>
+            <dc:date>2026-07-20T05:00:03Z</dc:date>
+          </item>
+        </rdf:RDF>"""
+
+        name, articles = _feed_entries(rdf_rss, "https://animeanime.jp/rss/index.rdf", 10)
+
+        self.assertEqual(name, "Anime Anime")
+        self.assertEqual(len(articles), 1)
+        self.assertEqual(articles[0].published_at, "2026-07-20T05:00:03Z")
+
     def test_atom_enclosure_extracts_cover_image(self):
         atom = b"""<?xml version="1.0" encoding="utf-8"?>
         <feed xmlns="http://www.w3.org/2005/Atom"><title>LN News</title>

@@ -105,9 +105,10 @@ class AcgDailyPlugin(Star):
 
             self._cache[session_key] = CacheEntry(time.monotonic(), image)
             logger.info(
-                "ACG 日报：已为 %s 生成单张图片日报。",
+                "ACG 日报：文转图完成，已为 %s 生成单张图片日报。",
                 session_key,
             )
+            logger.info("ACG 日报：正在向聊天平台发送图片日报。")
             yield event.image_result(image)
 
     def _source_urls(self) -> list[str]:
@@ -165,6 +166,11 @@ class AcgDailyPlugin(Star):
         selected_ids = {item.article_id for item in edition.items}
         selected = [article for article in articles if article.id in selected_ids]
         cover_images = await scraper.fetch_cover_images(selected)
+        logger.info(
+            "ACG 日报：入选 %d 条资讯，成功下载 %d 张封面，将开始生成图片。",
+            len(selected),
+            len(cover_images),
+        )
         return await self._render_daily_image(edition, articles, cover_images, results)
 
     async def _edit_with_current_model(
@@ -266,9 +272,22 @@ class AcgDailyPlugin(Star):
             date_text,
             source_status,
         )
-        logger.info("ACG 日报：正在将 %d 条资讯渲染为单张图片。", len(edition.items))
-        return await self.html_render(
-            html,
-            {},
-            options={"type": "jpeg", "quality": 88, "full_page": True, "animations": "disabled"},
+        logger.info(
+            "ACG 日报：开始调用 AstrBot 文转图服务，渲染 %d 条资讯（HTML %d 字符）。",
+            len(edition.items),
+            len(html),
         )
+        try:
+            image = await self.html_render(
+                html,
+                {},
+                options={"type": "jpeg", "quality": 88, "full_page": True, "animations": "disabled"},
+            )
+        except Exception as exc:
+            logger.exception("ACG 日报：AstrBot 文转图服务渲染失败：%s", exc)
+            raise RuntimeError("AstrBot 文转图服务渲染失败") from exc
+        if not image:
+            logger.error("ACG 日报：AstrBot 文转图服务未返回图片地址。")
+            raise RuntimeError("AstrBot 文转图服务未返回图片地址")
+        logger.info("ACG 日报：AstrBot 文转图服务渲染成功，已获得图片地址。")
+        return image
