@@ -108,19 +108,3 @@ def parse_edition(response_text: str, articles: list[Article], max_items: int) -
         raise ValueError("model response has no valid selected articles")
     intro = _bounded_text(data.get("intro"), 100)
     return DailyEdition(intro, items)
-
-
-def fallback_edition(articles: list[Article], max_items: int) -> DailyEdition:
-    """Keep the command useful if the configured LLM is unavailable."""
-
-    items = [
-        EditedItem(
-            article.id,
-            "资讯",
-            article.title,
-            article.summary or "该来源未提供摘要，请查看原文了解详情。",
-            "即时抓取候选资讯",
-        )
-        for article in articles[:max_items]
-    ]
-    return DailyEdition("以下内容由已配置资讯源即时抓取。", items)

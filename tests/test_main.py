@@ -37,6 +37,13 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("return [image]", source)
         self.assertNotIn("items_per_page", source)
 
+    def test_agent_format_failure_retries_without_tools_instead_of_sending_raw_candidates(self):
+        source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn("无工具重试", source)
+        self.assertIn("已跳过未经翻译的原始候选", source)
+        self.assertNotIn("fallback_edition(articles, max_items)", source)
+
 
 if __name__ == "__main__":
     unittest.main()

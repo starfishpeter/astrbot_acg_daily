@@ -15,7 +15,6 @@ from astrbot.core.agent.tool import FunctionTool, ToolSet
 from .acg_daily.editor import (
     build_editor_prompt,
     configured_system_prompt,
-    fallback_edition,
     parse_edition,
 )
 from .acg_daily.image_report import build_daily_image_html, normalize_cover_data_uri
@@ -346,7 +345,12 @@ class AcgDailyPlugin(Star):
         try:
             provider_id = await self.context.get_current_chat_provider_id(event.unified_msg_origin)
             system_prompt = configured_system_prompt(self.config.get("editor_system_prompt"))
+            prompt = build_editor_prompt(articles, max_items)
             search_tools = self._search_tools(event)
+        except Exception as exc:
+            logger.error("ACG 日报：无法准备编辑模型，已跳过未经翻译的原始候选：%s", exc)
+            return DailyEdition("无法准备日报编辑模型，本次未展示未经翻译的原始候选。", [])
+        try:
             if search_tools:
                 logger.info(
                     "ACG 日报：使用模型 %s 编辑 %d 条候选资讯，已允许其在必要时进行最多 10 次联网名称核对。",
@@ -357,7 +361,7 @@ class AcgDailyPlugin(Star):
                     event=event,
                     chat_provider_id=provider_id,
                     system_prompt=system_prompt,
-                    prompt=build_editor_prompt(articles, max_items),
+                    prompt=prompt,
                     tools=search_tools,
                     max_steps=12,
                     tool_call_timeout=30,
@@ -372,7 +376,7 @@ class AcgDailyPlugin(Star):
                 response = await self.context.llm_generate(
                     chat_provider_id=provider_id,
                     system_prompt=system_prompt,
-                    prompt=build_editor_prompt(articles, max_items),
+                    prompt=prompt,
                 )
             edition = parse_edition(response.completion_text, articles, max_items)
             logger.info(
@@ -383,8 +387,28 @@ class AcgDailyPlugin(Star):
                 return edition
             return DailyEdition(edition.intro or "本次候选资讯中没有适合收录的内容。", [])
         except Exception as exc:
-            logger.warning("ACG 日报：编辑模型不可用，改为按来源顺序输出：%s", exc)
-            return fallback_edition(articles, max_items)
+            if not search_tools:
+                logger.error("ACG 日报：编辑模型未返回合规 JSON，已跳过未经翻译的原始候选：%s", exc)
+                return DailyEdition("编辑模型未返回合规的日报内容，本次未展示未经翻译的原始候选。", [])
+            logger.warning(
+                "ACG 日报：带联网工具的编辑未返回合规 JSON，将使用同一模型进行一次无工具重试：%s",
+                exc,
+            )
+        try:
+            response = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                system_prompt=system_prompt,
+                prompt=prompt,
+            )
+            edition = parse_edition(response.completion_text, articles, max_items)
+            logger.info("ACG 日报：无工具重试成功，编辑模型返回 %d 条有效入选资讯。", len(edition.items))
+            return DailyEdition(edition.intro or "本次候选资讯中没有适合收录的内容。", edition.items)
+        except Exception as retry_exc:
+            logger.error(
+                "ACG 日报：无工具重试仍未返回合规 JSON，已跳过未经翻译的原始候选：%s",
+                retry_exc,
+            )
+            return DailyEdition("编辑模型未返回合规的日报内容，本次未展示未经翻译的原始候选。", [])
 
     def _search_tools(self, event: AstrMessageEvent) -> ToolSet | None:
         if not self.config.get("enable_web_search", False):
@@ -463,7 +487,7 @@ class AcgDailyPlugin(Star):
             image = await self.html_render(
                 html,
                 {},
-                options={"type": "png", "full_page": True, "animations": "disabled"},
+                options={"type": "png", "full_page": True, "animations": "disabled", "scale": "device"},
             )
         except Exception as exc:
             logger.exception("ACG 日报：AstrBot 文转图服务渲染失败：%s", exc)

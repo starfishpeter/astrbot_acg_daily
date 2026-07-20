@@ -135,6 +135,12 @@ class ImageReportTests(unittest.TestCase):
         self.assertIn("Anime Hack", html)
         self.assertIn("《测试动画》", html)
 
+    def test_report_scales_to_fill_the_renderer_viewport(self):
+        html = build_daily_image_html(DailyEdition("", []), [], {}, "日期", "状态")
+
+        self.assertIn("width: 62.5%;", html)
+        self.assertIn("zoom: 1.6;", html)
+
 
 if __name__ == "__main__":
     unittest.main()
