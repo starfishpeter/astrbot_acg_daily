@@ -16,13 +16,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from acg_daily.image_report import build_daily_image_html, normalize_cover_data_uri
 from acg_daily.models import Article, DailyEdition, EditedItem
+from acg_daily.ranking import Ranking, RankingEntry
 
 
 def _sample_cover(color: str, label: str) -> str:
     image = Image.new("RGB", (960, 720), color)
     draw = ImageDraw.Draw(image)
     draw.rectangle((42, 42, 918, 678), outline="#17243c", width=18)
-    draw.ellipse((150, 120, 810, 780), outline="#ffd84e", width=38)
+    draw.ellipse((150, 90, 810, 690), outline="#ffd84e", width=38)
     draw.text((95, 90), label, fill="#ffffff", stroke_width=2, stroke_fill="#17243c")
     output = io.BytesIO()
     image.save(output, format="JPEG", quality=85)
@@ -76,12 +77,32 @@ def main() -> None:
         3: _sample_cover("#22876c", "NOVEL / 03"),
         4: _sample_cover("#8a5ac2", "MANGA / 04"),
     }
+    ranking = Ranking(
+        "今日动画榜 Top 10",
+        "本地样例榜单",
+        tuple(
+            RankingEntry(rank, title, detail)
+            for rank, title, detail in (
+                (1, "群友最期待的新番", "2026 夏季 / TV"),
+                (2, "续作动画进入播出档期", "2026 秋季 / TV"),
+                (3, "漫画改编作品公开新预告", "制作进行中"),
+                (4, "轻小说人气系列动画化", "企划发表"),
+                (5, "原创动画公布主创阵容", "新作"),
+                (6, "经典作品完全新作动画", "重制企划"),
+                (7, "剧场版动画公开上映日", "电影"),
+                (8, "校园喜剧动画第二季", "续作"),
+                (9, "奇幻冒险作品持续热播", "TV"),
+                (10, "音乐题材动画新企划", "新作"),
+            )
+        ),
+    )
     html = build_daily_image_html(
         edition,
         articles,
         covers,
         datetime.now().strftime("%Y 年 %m 月 %d 日"),
-        "本地预览样例 / 4 条资讯 / 未调用 AstrBot 文转图",
+        "本地预览样例 / 4 条同尺寸资讯与纵向 Top 10 / 未调用 AstrBot 文转图",
+        ranking=ranking,
     )
     output = PROJECT_ROOT / "preview" / "daily-report-preview.html"
     output.parent.mkdir(exist_ok=True)

@@ -4,15 +4,16 @@ from pathlib import Path
 
 
 class MainSourceTests(unittest.TestCase):
-    def test_daily_item_limit_and_search_budget_are_twelve_and_ten(self):
+    def test_daily_item_limit_and_batch_search_budget_are_bounded(self):
         source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         constants = [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)]
 
         self.assertIn(12, constants)
-        self.assertIn(10, constants)
-        self.assertIn("max_steps=12", source)
-        self.assertIn("最多 10 次联网名称核对", source)
+        self.assertIn("MAX_LOOKUP_GROUPS", source)
+        self.assertIn("normalized_lookup_titles", source)
+        self.assertIn("max_steps=3", source)
+        self.assertIn("一次批量译名核对", source)
         self.assertIn("_DEFAULT_EDITOR_SLOW_WARNING_SECONDS = 600", source)
         self.assertIn("_await_editor_response", source)
         self.assertIn("editor_slow_warning_seconds", source)
@@ -78,9 +79,9 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("parse_edition_with_ranking", source)
         self.assertIn("排行榜标题翻译失败，已跳过榜单", source)
         self.assertIn("共用编辑模型中文化标题", source)
-        self.assertIn("两者共用最多 10 次联网名称核对", source)
+        self.assertIn("必要时仅进行一次批量译名核对", source)
         self.assertIn("编辑模型已中文化", source)
-        self.assertIn("新闻和排行榜作品名共用单次日报最多 10 次", editor_source)
+        self.assertIn("只可调用一次“批量译名核对”工具", editor_source)
 
 
 if __name__ == "__main__":

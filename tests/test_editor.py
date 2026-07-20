@@ -33,11 +33,13 @@ class EditorTests(unittest.TestCase):
             ),
         ]
 
-    def test_prompt_only_contains_source_fields(self):
+    def test_prompt_only_contains_fields_used_for_editorial_selection(self):
         prompt = build_editor_prompt(self.articles, 5)
 
         self.assertIn('"id":1', prompt)
-        self.assertIn('"source":"Example News"', prompt)
+        self.assertIn('"title":"Original announcement"', prompt)
+        self.assertIn('"summary":"A source summary."', prompt)
+        self.assertNotIn('"source"', prompt)
         self.assertNotIn("https://example.com/one", prompt)
 
     def test_editor_prompt_uses_a_core_acg_group_perspective(self):
@@ -45,12 +47,21 @@ class EditorTests(unittest.TestCase):
         self.assertIn("番剧、漫画和轻小说相关资讯最优先", SYSTEM_PROMPT)
         self.assertIn("二次元游戏相关报道", SYSTEM_PROMPT)
         self.assertIn("自然简洁的简体中文", SYSTEM_PROMPT)
-        self.assertIn("单次日报最多 10 次", SYSTEM_PROMPT)
+        self.assertIn("只可调用一次“批量译名核对”工具", SYSTEM_PROMPT)
         self.assertIn("联网只用于核对译名", SYSTEM_PROMPT)
-        self.assertIn("新闻和排行榜作品名共用", SYSTEM_PROMPT)
+        self.assertIn("只可调用一次“批量译名核对”工具", SYSTEM_PROMPT)
         self.assertIn("ranking_items", SYSTEM_PROMPT)
         self.assertIn("Fate、VTuber", SYSTEM_PROMPT)
         self.assertIn("不得补充候选没有提供的事实", SYSTEM_PROMPT)
+
+    def test_prompt_bounds_candidate_summaries_and_omits_unused_metadata(self):
+        article = Article(1, "Title", "x" * 500, "https://example.com", "Example News", "2026-07-21")
+
+        prompt = build_editor_prompt([article], 1)
+
+        self.assertIn('"summary":"' + "x" * 160 + '"', prompt)
+        self.assertNotIn("Example News", prompt)
+        self.assertNotIn("2026-07-21", prompt)
 
     def test_configured_system_prompt_uses_nonempty_override(self):
         self.assertEqual(configured_system_prompt("  Custom policy  "), "Custom policy")

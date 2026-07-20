@@ -25,6 +25,15 @@ from .acg_daily.models import Article, DailyEdition
 from .acg_daily.ranking import Ranking, fetch_ranking
 from .acg_daily.schedule import DailyPublishSettings, parse_daily_publish_settings
 from .acg_daily.scraper import NewsScraper, SourceResult, deduplicate_articles, is_http_url
+from .acg_daily.title_lookup import (
+    MAX_BAIDU_LOOKUP_QUERY_CHARS,
+    MAX_LOOKUP_GROUPS,
+    compact_lookup_result,
+    lookup_search_arguments,
+    lookup_title_groups,
+    normalized_lookup_titles,
+    run_lookup_groups,
+)
 
 
 _SCHEDULER_POLL_SECONDS = 15
@@ -88,27 +97,82 @@ class DailyEditorHooks(BaseAgentRunHooks):
         )
 
 
-class LimitedSearchTool(FunctionTool):
-    """Delegate to AstrBot search while bounding name checks per digest."""
+class BatchTitleLookupTool(FunctionTool):
+    """Perform a few compact title searches in one model-visible tool action."""
 
-    def __init__(self, tool: FunctionTool, max_calls: int = 10) -> None:
+    def __init__(self, tool: FunctionTool) -> None:
         super().__init__(
-            name=tool.name,
-            description=tool.description,
-            parameters=tool.parameters,
+            name="batch_title_lookup",
+            description=(
+                "一次性核对多个动画、漫画、轻小说、游戏作品的中国大陆常用中文译名。"
+                "仅在确实不确定译名时调用一次；titles 中列出全部需要核对的外文作品名，"
+                "不要逐条使用其他搜索工具。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "titles": {
+                        "type": "array",
+                        "description": "全部需要核对中文译名的外文作品名。",
+                        "items": {"type": "string"},
+                    }
+                },
+                "required": ["titles"],
+            },
         )
         self._tool = tool
-        self._max_calls = max_calls
-        self._call_count = 0
+        self._called = False
         self.active = tool.active
 
     async def call(self, context, **kwargs):
-        if self._call_count >= self._max_calls:
-            logger.warning("ACG 日报：已阻止额外的联网搜索调用，本次日报最多允许名称核对 %d 次。", self._max_calls)
-            return f"本次日报已经完成 {self._max_calls} 次联网名称核对，不能再次搜索。请基于候选资讯和已有搜索结果完成编辑。"
-        self._call_count += 1
-        return await self._tool.call(context, **kwargs)
+        if self._called:
+            logger.warning("ACG 日报：已阻止重复的批量译名核对，请基于已有结果完成编辑。")
+            return "本次日报已经完成一次批量译名核对，不能再次搜索。请基于候选资讯和已有搜索结果完成编辑。"
+        self._called = True
+        baidu_search = self._tool.name == "web_search_baidu"
+        titles = normalized_lookup_titles(
+            kwargs.get("titles"),
+            MAX_BAIDU_LOOKUP_QUERY_CHARS if baidu_search else 120,
+        )
+        if not titles:
+            return "没有收到可核对的作品名。请直接完成日报编辑。"
 
+        groups = lookup_title_groups(
+            titles,
+            MAX_BAIDU_LOOKUP_QUERY_CHARS if baidu_search else 420,
+        )
+        logger.info(
+            "ACG 日报：批量译名核对收到 %d 个作品名，将以 %d 个并发搜索组完成。",
+            len(titles),
+            len(groups),
+        )
+        searched_title_count = sum(len(group) for group in groups)
+        if searched_title_count < len(titles):
+            logger.warning(
+                "ACG 日报：批量译名核对最多允许 %d 个搜索组，将跳过 %d 个较低优先级标题。",
+                MAX_LOOKUP_GROUPS,
+                len(titles) - searched_title_count,
+        )
+        async def search_group(group: list[str]) -> object:
+            return await self._tool.call(
+                context,
+                **lookup_search_arguments(group, self._tool.name, self._tool.parameters),
+            )
+
+        results = await run_lookup_groups(groups, search_group)
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.warning("ACG 日报：批量译名核对的一个搜索组失败：%s", result)
+        compacted = [compact_lookup_result(result) for result in results]
+        usable = [result for result in compacted if result]
+        logger.info(
+            "ACG 日报：批量译名核对完成，%d/%d 个搜索组返回可用结果。",
+            len(usable),
+            len(groups),
+        )
+        if not usable:
+            return "批量译名核对未获得可用结果。请使用已有知识完成翻译，不要再次搜索。"
+        return "批量译名核对结果（仅用于作品名翻译，请勿据此补充新闻事实）：\n" + "\n\n".join(usable)
 
 class AcgDailyPlugin(Star):
     """Use /acg日报 to create an AI-edited ACG image digest."""
@@ -443,6 +507,13 @@ class AcgDailyPlugin(Star):
             system_prompt = configured_system_prompt(self.config.get("editor_system_prompt"))
             prompt = build_editor_prompt(articles, max_items, ranking)
             search_tools = self._search_tools(event)
+            logger.info(
+                "ACG 日报：编辑输入包含 %d 条候选、%d 条榜单，系统提示 %d 字符、候选输入 %d 字符。",
+                len(articles),
+                len(ranking.entries) if ranking is not None else 0,
+                len(system_prompt),
+                len(prompt),
+            )
         except Exception as exc:
             logger.error("ACG 日报：无法准备编辑模型，已跳过未经翻译的原始候选：%s", exc)
             return DailyEdition("无法准备日报编辑模型，本次未展示未经翻译的原始候选。", []), None
@@ -451,14 +522,14 @@ class AcgDailyPlugin(Star):
             if search_tools:
                 if ranking is not None:
                     logger.info(
-                        "ACG 日报：使用模型 %s 编辑 %d 条候选资讯并翻译 %d 条排行榜标题；两者共用最多 10 次联网名称核对。",
+                        "ACG 日报：使用模型 %s 编辑 %d 条候选资讯并翻译 %d 条排行榜标题；必要时仅进行一次批量译名核对。",
                         provider_id,
                         len(articles),
                         len(ranking.entries),
                     )
                 else:
                     logger.info(
-                        "ACG 日报：使用模型 %s 编辑 %d 条候选资讯，已允许其在必要时进行最多 10 次联网名称核对。",
+                        "ACG 日报：使用模型 %s 编辑 %d 条候选资讯，必要时仅进行一次批量译名核对。",
                         provider_id,
                         len(articles),
                     )
@@ -470,7 +541,7 @@ class AcgDailyPlugin(Star):
                         system_prompt=system_prompt,
                         prompt=prompt,
                         tools=search_tools,
-                        max_steps=12,
+                        max_steps=3,
                         tool_call_timeout=30,
                         agent_hooks=agent_hooks,
                     ),
@@ -576,8 +647,8 @@ class AcgDailyPlugin(Star):
         except (KeyError, TypeError) as exc:
             logger.warning("ACG 日报：无法加载网页搜索工具「%s」：%s", tool_name, exc)
             return None
-        logger.info("ACG 日报：已为编辑模型注入网页搜索工具「%s」。", tool_name)
-        return ToolSet([LimitedSearchTool(tool)])
+        logger.info("ACG 日报：已为编辑模型注入一次性批量译名核对工具，底层搜索提供商为「%s」。", tool_name)
+        return ToolSet([BatchTitleLookupTool(tool)])
 
     async def _prepare_cover_images(self, covers: dict[int, str]) -> dict[int, str]:
         """Adapt downloaded covers for Chromium before putting them in HTML."""

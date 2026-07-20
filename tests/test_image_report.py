@@ -138,8 +138,14 @@ class ImageReportTests(unittest.TestCase):
     def test_report_scales_to_fill_the_renderer_viewport(self):
         html = build_daily_image_html(DailyEdition("", []), [], {}, "日期", "状态")
 
-        self.assertIn("width: 62.5%;", html)
-        self.assertIn("zoom: 1.6;", html)
+        self.assertIn("width: 100%;", html)
+        self.assertIn("grid-template-columns: minmax(270px, 35%) minmax(0, 65%);", html)
+        self.assertIn("align-items: stretch;", html)
+        self.assertIn(".story-cover {\n    position: relative;\n    display: flex;\n    min-height: 0;", html)
+        self.assertIn("object-fit: contain;", html)
+        self.assertIn(".ranking-block ol { display: block;", html)
+        self.assertNotIn("grid-template-columns: repeat(2, minmax(0, 1fr));", html)
+        self.assertNotIn("grid-template-columns: minmax(310px, 40%) minmax(0, 60%);", html)
 
 
 if __name__ == "__main__":
