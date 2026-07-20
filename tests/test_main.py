@@ -13,8 +13,9 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn(10, constants)
         self.assertIn("max_steps=12", source)
         self.assertIn("最多 10 次联网名称核对", source)
-        self.assertIn("_EDITOR_SLOW_WARNING_SECONDS = 120", source)
+        self.assertIn("_DEFAULT_EDITOR_SLOW_WARNING_SECONDS = 600", source)
         self.assertIn("_await_editor_response", source)
+        self.assertIn("editor_slow_warning_seconds", source)
 
     def test_scheduled_publish_uses_context_send_message_and_lifecycle_hooks(self):
         source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")

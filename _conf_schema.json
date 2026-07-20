@@ -36,6 +36,12 @@
     "_special": "select_provider",
     "default": ""
   },
+  "editor_slow_warning_seconds": {
+    "type": "int",
+    "description": "编辑慢请求诊断阈值（秒）",
+    "hint": "模型编辑、联网核对和 JSON 输出累计等待超过此时间时，插件会记录中文阶段诊断但继续等待，不会取消日报。默认 600；设为 0 可关闭慢请求诊断日志。",
+    "default": 600
+  },
   "request_timeout_seconds": {
     "type": "int",
     "description": "单来源请求超时（秒）",

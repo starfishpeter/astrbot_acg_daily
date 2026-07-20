@@ -28,7 +28,7 @@ from .acg_daily.scraper import NewsScraper, SourceResult, deduplicate_articles, 
 
 
 _SCHEDULER_POLL_SECONDS = 15
-_EDITOR_SLOW_WARNING_SECONDS = 120
+_DEFAULT_EDITOR_SLOW_WARNING_SECONDS = 600
 
 
 @dataclass
@@ -330,18 +330,21 @@ class AcgDailyPlugin(Star):
     ):
         """Log a slow model request without cancelling a long daily edit."""
 
+        warning_seconds = self._editor_slow_warning_seconds()
         task = asyncio.ensure_future(operation)
+        if warning_seconds == 0:
+            return await task
         try:
             return await asyncio.wait_for(
                 asyncio.shield(task),
-                timeout=_EDITOR_SLOW_WARNING_SECONDS,
+                timeout=warning_seconds,
             )
         except asyncio.TimeoutError:
             diagnosis = agent_hooks.timeout_diagnosis() if agent_hooks else "尚未收到模型响应。"
             logger.warning(
                 "ACG 日报：%s已等待超过 %d 秒，但不会取消，将继续等待。诊断：%s",
                 stage,
-                _EDITOR_SLOW_WARNING_SECONDS,
+                warning_seconds,
                 diagnosis,
             )
             return await task
@@ -350,6 +353,14 @@ class AcgDailyPlugin(Star):
             with suppress(asyncio.CancelledError):
                 await task
             raise
+
+    def _editor_slow_warning_seconds(self) -> int:
+        """Read the optional diagnostic threshold without limiting model execution."""
+
+        try:
+            return max(0, int(self.config.get("editor_slow_warning_seconds", _DEFAULT_EDITOR_SLOW_WARNING_SECONDS)))
+        except (TypeError, ValueError):
+            return _DEFAULT_EDITOR_SLOW_WARNING_SECONDS
 
     async def _create_daily_images(
         self,
