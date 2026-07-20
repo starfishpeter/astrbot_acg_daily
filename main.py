@@ -15,8 +15,10 @@ from astrbot.core.agent.tool import FunctionTool, ToolSet
 
 from .acg_daily.editor import (
     build_editor_prompt,
+    build_editor_retry_prompt,
     configured_editor_provider,
     configured_system_prompt,
+    editor_response_diagnosis,
     parse_edition,
     parse_edition_with_ranking,
 )
@@ -31,6 +33,7 @@ from .acg_daily.title_lookup import (
     compact_lookup_result,
     format_bangumi_candidates,
     lookup_bangumi_titles,
+    lookup_references_for_text,
     lookup_search_arguments,
     lookup_title_groups,
     normalized_lookup_titles,
@@ -128,12 +131,19 @@ class BatchTitleLookupTool(FunctionTool):
         self._bangumi_access_token = bangumi_access_token
         self._timeout_seconds = timeout_seconds
         self._called = False
+        self.last_result = ""
+        self.bangumi_matches: dict = {}
+        self.web_fallback_titles: list[str] = []
         self.active = search_tool.active if search_tool is not None else True
+
+    def _finish(self, result: str) -> str:
+        self.last_result = result
+        return result
 
     async def call(self, context, **kwargs):
         if self._called:
             logger.warning("ACG 日报：已阻止重复的批量译名核对，请基于已有结果完成编辑。")
-            return "本次日报已经完成一次批量译名核对，不能再次搜索。请基于候选资讯和已有搜索结果完成编辑。"
+            return self._finish("本次日报已经完成一次批量译名核对，不能再次搜索。请基于候选资讯和已有搜索结果完成编辑。")
         self._called = True
         baidu_search = self._search_tool is not None and self._search_tool.name == "web_search_baidu"
         titles = normalized_lookup_titles(
@@ -141,22 +151,24 @@ class BatchTitleLookupTool(FunctionTool):
             MAX_BAIDU_LOOKUP_QUERY_CHARS if baidu_search else 120,
         )
         if not titles:
-            return "没有收到可核对的作品名。请直接完成日报编辑。"
+            return self._finish("没有收到可核对的作品名。请直接完成日报编辑。")
 
         bangumi_matches = {}
         if self._bangumi_access_token:
             bangumi_matches = await lookup_bangumi_titles(titles, self._bangumi_access_token, self._timeout_seconds)
             matched_count = sum(1 for candidates in bangumi_matches.values() if candidates)
             logger.info("ACG 日报：Bangumi 已返回 %d/%d 个作品名的中文词条候选。", matched_count, len(titles))
+        self.bangumi_matches = bangumi_matches
 
         unresolved_titles = unresolved_bangumi_titles(titles, bangumi_matches)
+        self.web_fallback_titles = unresolved_titles
         bangumi_result = format_bangumi_candidates(bangumi_matches)
         if not unresolved_titles:
-            return bangumi_result or "Bangumi 未返回可用中文词条候选。请使用已有知识完成翻译。"
+            return self._finish(bangumi_result or "Bangumi 未返回可用中文词条候选。请使用已有知识完成翻译。")
         if self._search_tool is None:
             if bangumi_result:
-                return bangumi_result + "\n\n以下作品未获得 Bangumi 中文候选，请使用已有知识完成翻译：" + "；".join(unresolved_titles)
-            return "Bangumi 未返回可用中文词条候选，且网页搜索未启用。请使用已有知识完成翻译。"
+                return self._finish(bangumi_result + "\n\n以下作品未获得 Bangumi 中文候选，请使用已有知识完成翻译：" + "；".join(unresolved_titles))
+            return self._finish("Bangumi 未返回可用中文词条候选，且网页搜索未启用。请使用已有知识完成翻译。")
 
         groups = lookup_title_groups(
             unresolved_titles,
@@ -192,9 +204,18 @@ class BatchTitleLookupTool(FunctionTool):
             len(groups),
         )
         if not usable:
-            return (bangumi_result + "\n\n" if bangumi_result else "") + "网页搜索未获得可用结果。请使用已有知识完成翻译，不要再次搜索。"
+            return self._finish((bangumi_result + "\n\n" if bangumi_result else "") + "网页搜索未获得可用结果。请使用已有知识完成翻译，不要再次搜索。")
         web_result = "网页搜索兜底结果（仅用于未获 Bangumi 中文候选的作品名翻译，请勿据此补充新闻事实）：\n" + "\n\n".join(usable)
-        return (bangumi_result + "\n\n" if bangumi_result else "") + web_result
+        return self._finish((bangumi_result + "\n\n" if bangumi_result else "") + web_result)
+
+    def references_for(self, original_title: str):
+        provider = self._search_tool.name if self._search_tool is not None else "网页搜索"
+        return lookup_references_for_text(
+            original_title,
+            self.bangumi_matches,
+            self.web_fallback_titles,
+            provider,
+        )
 
 class AcgDailyPlugin(Star):
     """Use /acg日报 to create an AI-edited ACG image digest."""
@@ -528,7 +549,8 @@ class AcgDailyPlugin(Star):
                 logger.info("ACG 日报：使用当前会话的编辑模型 %s。", provider_id)
             system_prompt = configured_system_prompt(self.config.get("editor_system_prompt"))
             prompt = build_editor_prompt(articles, max_items, ranking)
-            search_tools = self._search_tools(event)
+            title_lookup_tool = self._title_lookup_tool(event)
+            search_tools = ToolSet([title_lookup_tool]) if title_lookup_tool is not None else None
             logger.info(
                 "ACG 日报：编辑输入包含 %d 条候选、%d 条榜单，系统提示 %d 字符、候选输入 %d 字符。",
                 len(articles),
@@ -539,6 +561,7 @@ class AcgDailyPlugin(Star):
         except Exception as exc:
             logger.error("ACG 日报：无法准备编辑模型，已跳过未经翻译的原始候选：%s", exc)
             return DailyEdition("无法准备日报编辑模型，本次未展示未经翻译的原始候选。", []), None
+        response = None
         try:
             agent_hooks: DailyEditorHooks | None = None
             if search_tools:
@@ -595,6 +618,7 @@ class AcgDailyPlugin(Star):
                 "ACG 日报：编辑模型返回 %d 条有效入选资讯。",
                 len(edition.items),
             )
+            self._log_title_translation_references(edition, articles, translated_ranking, ranking, title_lookup_tool)
             if ranking_error:
                 logger.warning("ACG 日报：排行榜标题翻译失败，已跳过榜单：%s", ranking_error)
             elif translated_ranking is not None:
@@ -607,16 +631,18 @@ class AcgDailyPlugin(Star):
                 logger.error("ACG 日报：编辑模型未返回合规 JSON，已跳过未经翻译的原始候选：%s", exc)
                 return DailyEdition("编辑模型未返回合规的日报内容，本次未展示未经翻译的原始候选。", []), None
             logger.warning(
-                "ACG 日报：带联网工具的编辑未返回合规 JSON，将使用同一模型进行一次无工具重试：%s",
+                "ACG 日报：带联网工具的编辑未返回合规 JSON，将使用同一模型进行一次无工具重试：%s。\n%s",
                 exc,
+                editor_response_diagnosis(getattr(response, "completion_text", "")),
             )
         try:
+            retry_prompt = build_editor_retry_prompt(prompt, title_lookup_tool.last_result if title_lookup_tool else "")
             logger.info("ACG 日报：开始使用模型 %s 进行无工具重试。", provider_id)
             response = await self._await_editor_response(
                 self.context.llm_generate(
                     chat_provider_id=provider_id,
                     system_prompt=system_prompt,
-                    prompt=prompt,
+                    prompt=retry_prompt,
                 ),
                 "无工具重试",
             )
@@ -627,6 +653,7 @@ class AcgDailyPlugin(Star):
                 ranking,
             )
             logger.info("ACG 日报：无工具重试成功，编辑模型返回 %d 条有效入选资讯。", len(edition.items))
+            self._log_title_translation_references(edition, articles, translated_ranking, ranking, title_lookup_tool)
             if ranking_error:
                 logger.warning("ACG 日报：排行榜标题翻译失败，已跳过榜单：%s", ranking_error)
             elif translated_ranking is not None:
@@ -639,7 +666,57 @@ class AcgDailyPlugin(Star):
             )
             return DailyEdition("编辑模型未返回合规的日报内容，本次未展示未经翻译的原始候选。", []), None
 
-    def _search_tools(self, event: AstrMessageEvent) -> ToolSet | None:
+    @staticmethod
+    def _log_title_translation_references(
+        edition: DailyEdition,
+        articles: list[Article],
+        translated_ranking: Ranking | None,
+        original_ranking: Ranking | None,
+        title_lookup_tool: BatchTitleLookupTool | None,
+    ) -> None:
+        """Make the final title translation and the lookup material auditable in logs."""
+
+        articles_by_id = {article.id: article for article in articles}
+        for item in edition.items:
+            article = articles_by_id.get(item.article_id)
+            if article is None:
+                continue
+            logger.info(
+                "ACG 日报：新闻译名对照：%s -> %s；%s",
+                article.title,
+                item.title,
+                AcgDailyPlugin._lookup_reference_text(title_lookup_tool, article.title),
+            )
+        if translated_ranking is None or original_ranking is None:
+            return
+        original_by_rank = {entry.rank: entry for entry in original_ranking.entries}
+        for entry in translated_ranking.entries:
+            original = original_by_rank.get(entry.rank)
+            if original is None:
+                continue
+            logger.info(
+                "ACG 日报：榜单译名对照：%s -> %s；%s",
+                original.title,
+                entry.title,
+                AcgDailyPlugin._lookup_reference_text(title_lookup_tool, original.title),
+            )
+
+    @staticmethod
+    def _lookup_reference_text(title_lookup_tool: BatchTitleLookupTool | None, original_title: str) -> str:
+        if title_lookup_tool is None or not title_lookup_tool.last_result:
+            return "未经过本次译名核对"
+        references = title_lookup_tool.references_for(original_title)
+        if not references:
+            return "未命中本次查询词，由模型依据已有知识或上下文翻译"
+        parts = []
+        for reference in references:
+            if reference.channel == "Bangumi":
+                parts.append(f"Bangumi 查询「{reference.query}」候选：{'、'.join(reference.candidates)}")
+            else:
+                parts.append(f"{reference.channel} 网页兜底查询「{reference.query}」")
+        return "；".join(parts)
+
+    def _title_lookup_tool(self, event: AstrMessageEvent) -> BatchTitleLookupTool | None:
         configured_token = self.config.get("bangumi_access_token", "")
         bangumi_access_token = configured_token.strip() if isinstance(configured_token, str) else ""
         search_tool = self._configured_web_search_tool(event) if self.config.get("enable_web_search", False) else None
@@ -647,14 +724,10 @@ class AcgDailyPlugin(Star):
             return None
         if bangumi_access_token:
             logger.info("ACG 日报：已为编辑模型启用 Bangumi 中文词条候选核对。")
-        return ToolSet(
-            [
-                BatchTitleLookupTool(
-                    search_tool,
-                    bangumi_access_token,
-                    int(self.config.get("request_timeout_seconds", 10)),
-                )
-            ]
+        return BatchTitleLookupTool(
+            search_tool,
+            bangumi_access_token,
+            int(self.config.get("request_timeout_seconds", 10)),
         )
 
     def _configured_web_search_tool(self, event: AstrMessageEvent) -> FunctionTool | None:

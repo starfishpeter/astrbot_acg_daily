@@ -4,6 +4,8 @@ from pathlib import Path
 
 from acg_daily.editor import (
     SYSTEM_PROMPT,
+    editor_response_diagnosis,
+    build_editor_retry_prompt,
     build_editor_prompt,
     configured_editor_provider,
     configured_system_prompt,
@@ -53,6 +55,9 @@ class EditorTests(unittest.TestCase):
         self.assertIn("ranking_items", SYSTEM_PROMPT)
         self.assertIn("Fate、VTuber", SYSTEM_PROMPT)
         self.assertIn("不得补充候选没有提供的事实", SYSTEM_PROMPT)
+        self.assertIn("无论是否调用过工具", SYSTEM_PROMPT)
+        self.assertIn("items 是始终必填的数组", SYSTEM_PROMPT)
+        self.assertIn('"items":[]', SYSTEM_PROMPT)
 
     def test_prompt_bounds_candidate_summaries_and_omits_unused_metadata(self):
         article = Article(1, "Title", "x" * 500, "https://example.com", "Example News", "2026-07-21")
@@ -67,6 +72,25 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(configured_system_prompt("  Custom policy  "), "Custom policy")
         self.assertEqual(configured_system_prompt("\n\t"), SYSTEM_PROMPT)
         self.assertEqual(configured_system_prompt(None), SYSTEM_PROMPT)
+
+    def test_retry_prompt_keeps_completed_title_lookups_and_requires_items(self):
+        prompt = build_editor_retry_prompt("候选资讯", "Bangumi 词条候选\n- 原名 -> 中文名")
+
+        self.assertIn("候选资讯", prompt)
+        self.assertIn("Bangumi 词条候选", prompt)
+        self.assertIn("包含 items", prompt)
+        self.assertIn("不要再次调用工具", prompt)
+        self.assertIn("完整 ranking_items 数组", prompt)
+
+    def test_response_diagnosis_includes_full_completion_and_json_shape(self):
+        completion = '{"intro":"only intro","ranking_items":[]}'
+
+        diagnosis = editor_response_diagnosis(completion)
+
+        self.assertIn(f"completion 字符数：{len(completion)}", diagnosis)
+        self.assertIn("JSON 顶层字段：intro, ranking_items", diagnosis)
+        self.assertIn("items=缺失", diagnosis)
+        self.assertIn(completion, diagnosis)
 
     def test_configured_editor_provider_uses_an_optional_fixed_provider(self):
         self.assertEqual(configured_editor_provider("  deepseek/deepseek-v4-pro  "), "deepseek/deepseek-v4-pro")

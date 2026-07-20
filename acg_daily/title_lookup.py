@@ -27,6 +27,13 @@ class BangumiCandidate:
     date: str
 
 
+@dataclass(frozen=True)
+class TitleLookupReference:
+    query: str
+    channel: str
+    candidates: tuple[str, ...]
+
+
 def normalized_lookup_titles(value: object, max_title_chars: int = 120) -> list[str]:
     """Keep a bounded, de-duplicated list of model-requested titles."""
 
@@ -66,7 +73,7 @@ def lookup_search_arguments(
 ) -> dict[str, object]:
     """Use each built-in provider's native result-limit parameter."""
 
-    query = "；".join(titles)
+    query = "、".join(f'"{title}"' for title in titles)
     if tool_name == "web_search_baidu":
         query += " 中文译名"
     else:
@@ -141,6 +148,33 @@ def unresolved_bangumi_titles(titles: list[str], matches: dict[str, list[Bangumi
     """Only titles with no Chinese candidate need a web-search fallback."""
 
     return [title for title in titles if not matches.get(title)]
+
+
+def lookup_references_for_text(
+    text: str,
+    bangumi_matches: dict[str, list[BangumiCandidate]],
+    web_fallback_titles: list[str],
+    web_provider: str,
+) -> list[TitleLookupReference]:
+    """Relate an original title to Bangumi or web-search material it contained."""
+
+    normalized_text = " ".join(str(text).casefold().split())
+    references: list[TitleLookupReference] = []
+    for query, candidates in bangumi_matches.items():
+        normalized_query = " ".join(query.casefold().split())
+        if normalized_query and normalized_query in normalized_text:
+            references.append(
+                TitleLookupReference(
+                    query,
+                    "Bangumi",
+                    tuple(candidate.name_cn for candidate in candidates),
+                )
+            )
+    for query in web_fallback_titles:
+        normalized_query = " ".join(query.casefold().split())
+        if normalized_query and normalized_query in normalized_text:
+            references.append(TitleLookupReference(query, web_provider, ()))
+    return references
 
 
 def bangumi_search_request(title: str, access_token: str) -> tuple[str, dict[str, str], dict[str, object]]:

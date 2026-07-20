@@ -11,6 +11,7 @@ from acg_daily.title_lookup import (
     bangumi_search_request,
     format_bangumi_candidates,
     lookup_search_arguments,
+    lookup_references_for_text,
     lookup_title_groups,
     normalized_lookup_titles,
     parse_bangumi_candidates,
@@ -53,7 +54,8 @@ class TitleLookupTests(unittest.TestCase):
         ]
 
         self.assertEqual(tavily["max_results"], 5)
-        self.assertEqual(baidu, {"query": "Title 中文译名", "top_k": 4})
+        self.assertIn('"Title"', tavily["query"])
+        self.assertEqual(baidu, {"query": '"Title" 中文译名', "top_k": 4})
         self.assertEqual([{key for key in value if key != "query"}.pop() for value in all_limits], list(properties))
 
     def test_search_result_is_compacted_to_four_short_snippets(self):
@@ -151,6 +153,20 @@ class TitleLookupTests(unittest.TestCase):
         }
 
         self.assertEqual(unresolved_bangumi_titles(titles, matches), ["unmatched title"])
+
+    def test_lookup_references_identify_bangumi_and_web_fallback_channels(self):
+        references = lookup_references_for_text(
+            "Original Anime gets a new trailer; Missing Title is also announced",
+            {"Original Anime": [BangumiCandidate("Original Anime", "中文动画", 2, "")]},
+            ["Missing Title"],
+            "web_search_tavily",
+        )
+
+        self.assertEqual(references[0].query, "Original Anime")
+        self.assertEqual(references[0].channel, "Bangumi")
+        self.assertEqual(references[0].candidates, ("中文动画",))
+        self.assertEqual(references[1].query, "Missing Title")
+        self.assertEqual(references[1].channel, "web_search_tavily")
 
     def test_lookup_groups_run_concurrently_and_tolerate_partial_failure(self):
         started = 0
