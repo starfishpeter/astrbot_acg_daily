@@ -162,11 +162,11 @@
     background: #fff;
     box-shadow: 5px 5px 0 rgba(21,142,137,.1);
   }
-  .story-card.feature { display: block; margin-bottom: 18px; }
-  .story-card.standard { display: block; margin-top: 15px; }
+  .story-card.feature { display: block; margin-bottom: 14px; }
+  .story-card.standard { display: block; margin-top: 12px; }
   .story-cover { position: relative; overflow: hidden; background: var(--mint); }
-  .feature .story-cover { height: 320px; }
-  .standard .story-cover { height: 208px; }
+  .feature .story-cover { height: 260px; }
+  .standard .story-cover { height: 154px; }
   .cover-image { display: block; width: 100%; height: 100%; object-fit: cover; }
   .story-body { min-width: 0; padding: 17px 19px 19px; background: #fff; }
   .feature .story-body { padding: 21px 22px 23px; }
@@ -230,6 +230,8 @@
     color: var(--teal-deep);
   }
   .cover-placeholder-featured { background-color: var(--aqua); }
+  .story-card.without-cover .story-cover { height: 82px; }
+  .story-card.feature.without-cover .story-cover { height: 104px; }
   .cover-placeholder strong {
     position: relative;
     z-index: 2;
@@ -239,18 +241,18 @@
     border-radius: 5px;
     background: #f4fffe;
     box-shadow: 5px 5px 0 rgba(21,142,137,.16);
-    font-size: 26px;
+    font-size: 18px;
     font-weight: 900;
     letter-spacing: 2px;
     text-align: center;
   }
-  .cover-placeholder-featured strong { font-size: 34px; }
-  .cover-kicker, .cover-code { position: absolute; z-index: 2; font-size: 11px; font-weight: 900; letter-spacing: .7px; }
-  .cover-kicker { top: 17px; left: 18px; }
-  .cover-code { right: 16px; bottom: 15px; }
+  .cover-placeholder-featured strong { font-size: 22px; }
+  .cover-kicker, .cover-code { position: absolute; z-index: 2; font-size: 9px; font-weight: 900; letter-spacing: .7px; }
+  .cover-kicker { top: 11px; left: 13px; }
+  .cover-code { right: 12px; bottom: 10px; }
   .cover-orbit { position: absolute; border: 4px solid var(--pink); border-radius: 50%; }
-  .orbit-one { width: 220px; height: 220px; right: -84px; top: -86px; }
-  .orbit-two { width: 130px; height: 130px; left: -60px; bottom: -57px; border-color: var(--aqua); }
+  .orbit-one { width: 130px; height: 130px; right: -52px; top: -55px; }
+  .orbit-two { width: 88px; height: 88px; left: -42px; bottom: -40px; border-color: var(--aqua); }
   .empty-state { padding: 85px 30px; border: 1px solid var(--line); border-radius: 8px; background: #fff; text-align: center; }
   .empty-state span { color: var(--teal); font-weight: 900; letter-spacing: 2px; }
   .empty-state h2 { margin: 16px 0; font-size: 25px; }
@@ -298,7 +300,7 @@
       <div class="masthead-meta"><span>ACG VISUAL DESK / ISSUE 01</span><span>{{DATE}}</span></div>
       <h1>次元放送局</h1>
       <p>{{SOURCE_STATUS}}</p>
-      <div class="edition-box">{{PAGE_LABEL}} / {{PAGE_NUMBER}}-{{PAGE_COUNT}}</div>
+      <div class="edition-box">DAILY ONE SHOT</div>
     </header>
     <section class="brief"><span class="brief-label">EDITOR NOTE</span>{{INTRO}}</section>
     <section class="headline-stack">

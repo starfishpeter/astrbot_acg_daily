@@ -20,7 +20,7 @@
   "max_daily_items": {
     "type": "int",
     "description": "日报最大条数",
-    "hint": "AI 最多挑选多少条资讯，建议 8-12；每 4 条生成一页图片。",
+    "hint": "AI 最多挑选多少条资讯，建议 8-12；所有入选资讯会合并到同一张长图。",
     "default": 12
   },
   "editor_system_prompt": {
@@ -68,7 +68,7 @@
   "ranking_source": {
     "type": "string",
     "description": "日报排行榜来源",
-    "hint": "可选在日报最后一页附加一个固定来源的动画 Top 10。排行榜独立于新闻订阅源、候选去重和 AI 编辑；抓取失败时仅跳过榜单，新闻日报仍会正常发送。",
+    "hint": "可选在日报长图底部附加一个固定来源的动画 Top 10。排行榜独立于新闻订阅源、候选去重和 AI 编辑；抓取失败时仅跳过榜单，新闻日报仍会正常发送。",
     "options": ["disabled", "anime-planet", "anime-trending", "anime-hack"],
     "default": "disabled"
   },

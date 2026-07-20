@@ -30,6 +30,13 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("daily_publish_group_whitelist", schedule_source)
         self.assertIn("GroupMessage", schedule_source)
 
+    def test_daily_report_renders_and_sends_one_long_image(self):
+        source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn("渲染单张长图", source)
+        self.assertIn("return [image]", source)
+        self.assertNotIn("items_per_page", source)
+
 
 if __name__ == "__main__":
     unittest.main()

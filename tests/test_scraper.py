@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 from acg_daily.models import Article
 from acg_daily.scraper import (
+    _read_limited_body,
     _article_page_cover_url,
     _feed_entries,
     _html_entries,
@@ -28,6 +29,18 @@ HTML = b"""<!doctype html><html><head><meta property="og:site_name" content="Exa
 
 
 class ScraperTests(unittest.TestCase):
+    def test_limited_body_reader_reads_all_chunks_until_eof(self):
+        class Content:
+            def __init__(self):
+                self.chunks = [b"first", b"-second", b""]
+
+            async def read(self, _limit):
+                return self.chunks.pop(0)
+
+        body = asyncio.run(_read_limited_body(Content(), 20, "response"))
+
+        self.assertEqual(body, b"first-second")
+
     def test_rss_extracts_normalized_articles(self):
         name, articles = _feed_entries(RSS, "https://example.com/feed", 10)
 
@@ -181,8 +194,12 @@ class ScraperTests(unittest.TestCase):
 
     def test_fetch_cover_image_accepts_gnn_webp_and_png_responses(self):
         class Content:
+            def __init__(self):
+                self.pending = b"cover"
+
             async def read(self, _limit):
-                return b"cover"
+                chunk, self.pending = self.pending, b""
+                return chunk
 
         class Response:
             status = 200

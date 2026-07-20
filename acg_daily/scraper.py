@@ -185,11 +185,22 @@ async def _read_source_response(
             content_length = response.content_length
             if content_length is not None and content_length > MAX_RESPONSE_BYTES:
                 raise ValueError("response exceeds the 2 MiB limit")
-            body = await response.content.read(MAX_RESPONSE_BYTES + 1)
-            if len(body) > MAX_RESPONSE_BYTES:
-                raise ValueError("response exceeds the 2 MiB limit")
+            body = await _read_limited_body(response.content, MAX_RESPONSE_BYTES, "response")
             return current_url, body, response.headers.get("Content-Type", "")
     raise ValueError("too many redirects")
+
+
+async def _read_limited_body(content, maximum_bytes: int, label: str) -> bytes:
+    """Read through EOF while enforcing a byte limit for streaming responses."""
+
+    body = bytearray()
+    while True:
+        chunk = await content.read(min(64 * 1024, maximum_bytes + 1 - len(body)))
+        if not chunk:
+            return bytes(body)
+        body.extend(chunk)
+        if len(body) > maximum_bytes:
+            raise ValueError(f"{label} exceeds the {maximum_bytes // (1024 * 1024)} MiB limit")
 
 
 def _feed_value(entry: object, name: str, default: object = "") -> object:
@@ -748,11 +759,7 @@ class NewsScraper:
                         "cover is "
                         f"{response.content_length} bytes and exceeds the 4 MiB limit ({current_url})",
                     )
-                body = await response.content.read(MAX_IMAGE_BYTES + 1)
-                if len(body) > MAX_IMAGE_BYTES:
-                    raise ValueError(
-                        f"cover exceeds the 4 MiB limit ({len(body)} bytes read, {current_url})",
-                    )
+                body = await _read_limited_body(response.content, MAX_IMAGE_BYTES, "cover")
                 encoded = base64.b64encode(body).decode("ascii")
                 return f"data:{content_type};base64,{encoded}"
         raise ValueError("too many cover redirects")

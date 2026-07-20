@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import io
+import threading
+import warnings
 from html import escape
 from pathlib import Path
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageFile, ImageOps
 
 from .models import Article, DailyEdition, EditedItem
 from .ranking import Ranking
@@ -14,6 +16,7 @@ from .ranking import Ranking
 TEMPLATE_DIR = Path(__file__).with_name("templates") / "visual_desk"
 MAX_COVER_SIZE = (960, 720)
 MAX_COVER_PIXELS = 24_000_000
+_TRUNCATED_IMAGE_LOCK = threading.Lock()
 
 
 def _template(name: str) -> str:
@@ -45,19 +48,27 @@ def normalize_cover_data_uri(cover: str) -> str:
     except ValueError as exc:
         raise ValueError("cover data URI has invalid base64") from exc
 
-    with Image.open(io.BytesIO(image_bytes)) as source:
-        if source.width * source.height > MAX_COVER_PIXELS:
-            raise ValueError("cover dimensions exceed the 24 megapixel limit")
-        image = ImageOps.exif_transpose(source).convert("RGBA")
-        if image.getchannel("A").getextrema()[0] < 255:
-            background = Image.new("RGB", image.size, "#f3f7fb")
-            background.paste(image, mask=image.getchannel("A"))
-            image = background
-        else:
-            image = image.convert("RGB")
-        image.thumbnail(MAX_COVER_SIZE, Image.Resampling.LANCZOS)
-        output = io.BytesIO()
-        image.save(output, format="JPEG", quality=82, optimize=True)
+    with _TRUNCATED_IMAGE_LOCK:
+        previous_truncated_images = ImageFile.LOAD_TRUNCATED_IMAGES
+        try:
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(io.BytesIO(image_bytes)) as source:
+                    if source.width * source.height > MAX_COVER_PIXELS:
+                        raise ValueError("cover dimensions exceed the 24 megapixel limit")
+                    image = ImageOps.exif_transpose(source).convert("RGBA")
+                    if image.getchannel("A").getextrema()[0] < 255:
+                        background = Image.new("RGB", image.size, "#f3f7fb")
+                        background.paste(image, mask=image.getchannel("A"))
+                        image = background
+                    else:
+                        image = image.convert("RGB")
+                    image.thumbnail(MAX_COVER_SIZE, Image.Resampling.LANCZOS)
+                    output = io.BytesIO()
+                    image.save(output, format="JPEG", quality=82, optimize=True)
+        finally:
+            ImageFile.LOAD_TRUNCATED_IMAGES = previous_truncated_images
 
     encoded = base64.b64encode(output.getvalue()).decode("ascii")
     return f"data:image/jpeg;base64,{encoded}"
@@ -98,7 +109,7 @@ def _story_card(
     )
     return _render(
         _template("story_card.html"),
-        CARD_KIND="feature" if featured else "standard",
+        CARD_KIND=("feature" if featured else "standard") + (" with-cover" if cover else " without-cover"),
         ACCENT=str((index - 1) % 4 + 1),
         INDEX=f"{index:02d}",
         CATEGORY=escape(_truncate(item.category, 12)),
@@ -135,9 +146,6 @@ def build_daily_image_html(
     cover_images: dict[int, str],
     date_text: str,
     source_status: str,
-    page_number: int = 1,
-    page_count: int = 1,
-    page_start: int = 1,
     ranking: Ranking | None = None,
 ) -> str:
     """Render one readable ACG news page from a theme and story-card template.
@@ -148,7 +156,7 @@ def build_daily_image_html(
 
     article_by_id = {article.id: article for article in articles}
     selected = [
-        (page_start + offset, item, article_by_id[item.article_id])
+        (offset + 1, item, article_by_id[item.article_id])
         for offset, item in enumerate(edition.items)
         if item.article_id in article_by_id
     ]
@@ -176,11 +184,6 @@ def build_daily_image_html(
         """
         stories = ""
 
-    continuation = (
-        "今日精选首报"
-        if page_number == 1
-        else f"续页 {page_number:02d} / {page_count:02d}"
-    )
     intro = edition.intro or "把值得聊的动画、漫画、轻小说和二次元动态放进今天的编辑台。"
     return _render(
         _template("page.html"),
@@ -190,7 +193,4 @@ def build_daily_image_html(
         FEATURE=feature,
         STORIES=stories,
         RANKING=_ranking_block(ranking),
-        PAGE_LABEL=escape(continuation),
-        PAGE_NUMBER=f"{page_number:02d}",
-        PAGE_COUNT=f"{page_count:02d}",
     )
