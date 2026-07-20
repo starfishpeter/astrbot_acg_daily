@@ -21,7 +21,7 @@
     "type": "int",
     "description": "日报最大条数",
     "hint": "AI 最多挑选多少条资讯，建议 5-8。",
-    "default": 7
+    "default": 8
   },
   "request_timeout_seconds": {
     "type": "int",
@@ -40,11 +40,5 @@
     "description": "允许 AI 联网核对作品名",
     "hint": "仅在资讯源没有中文标题且名称容易混淆时，允许日报编辑模型调用 AstrBot 已配置的网页搜索工具。默认关闭，以节省 Tavily 等搜索额度。",
     "default": false
-  },
-  "node_name": {
-    "type": "string",
-    "description": "转发节点显示名称",
-    "hint": "QQ 合并转发中每个节点显示的发送者名称。",
-    "default": "ACG 日报"
   }
 }

@@ -48,6 +48,37 @@ class ScraperTests(unittest.TestCase):
         self.assertEqual(len(articles), 1)
         self.assertEqual(articles[0].url, "https://gnn.gamer.com.tw/detail.php?sn=1")
 
+    def test_rdf_rss_extracts_articles(self):
+        rdf_rss = b"""<?xml version="1.0" encoding="utf-8"?>
+        <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+          xmlns="http://purl.org/rss/1.0/">
+          <channel rdf:about="https://example.com/"><title>Anime News</title></channel>
+          <item rdf:about="https://example.com/news/one">
+            <title>Anime announcement</title><link>https://example.com/news/one</link>
+          </item>
+        </rdf:RDF>"""
+
+        name, articles = _feed_entries(rdf_rss, "https://example.com/feed.rdf", 10)
+
+        self.assertEqual(name, "Anime News")
+        self.assertEqual(len(articles), 1)
+        self.assertEqual(articles[0].title, "Anime announcement")
+
+    def test_atom_enclosure_extracts_cover_image(self):
+        atom = b"""<?xml version="1.0" encoding="utf-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom"><title>LN News</title>
+          <entry><title>Anime news</title>
+            <link rel="enclosure" type="image/jpeg" href="https://images.example/cover.jpg" />
+            <link rel="alternate" href="https://example.com/news/one" />
+          </entry>
+        </feed>"""
+
+        name, articles = _feed_entries(atom, "https://example.com/feed", 10)
+
+        self.assertEqual(name, "LN News")
+        self.assertEqual(len(articles), 1)
+        self.assertEqual(articles[0].cover_url, "https://images.example/cover.jpg")
+
     def test_html_extracts_article_cards(self):
         name, articles = _html_entries(HTML, "https://example.com/news", 10)
 

@@ -13,6 +13,7 @@ class Article:
     url: str
     source: str
     published_at: str = ""
+    cover_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,7 @@ class EditedItem:
 
 @dataclass(frozen=True)
 class DailyEdition:
-    """The validated editorial result used to create QQ forward nodes."""
+    """The validated editorial result used to create the image digest."""
 
     intro: str
     items: list[EditedItem]

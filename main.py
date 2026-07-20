@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import time
 from dataclasses import dataclass
 from datetime import datetime
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Node, Nodes, Plain
 from astrbot.api.star import Context, Star
 from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 
 from .acg_daily.editor import SYSTEM_PROMPT, build_editor_prompt, fallback_edition, parse_edition
+from .acg_daily.image_report import build_daily_image_html
 from .acg_daily.models import Article, DailyEdition
 from .acg_daily.scraper import NewsScraper, SourceResult, deduplicate_articles, is_http_url
 
@@ -21,7 +20,7 @@ from .acg_daily.scraper import NewsScraper, SourceResult, deduplicate_articles, 
 @dataclass
 class CacheEntry:
     created_at: float
-    nodes: list[Node]
+    image: str
 
 
 class DailyEditorHooks(BaseAgentRunHooks):
@@ -65,7 +64,7 @@ class SingleUseSearchTool(FunctionTool):
 
 
 class AcgDailyPlugin(Star):
-    """Use /acg日报 to create an AI-edited QQ forward-message news digest."""
+    """Use /acg日报 to create an AI-edited ACG image digest."""
 
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
@@ -75,7 +74,7 @@ class AcgDailyPlugin(Star):
 
     @filter.command("acg日报", alias={"ACG日报"})
     async def acg_daily(self, event: AstrMessageEvent):
-        """即时抓取已配置的 ACG 资讯源并发送合并转发日报。"""
+        """即时抓取已配置的 ACG 资讯源并发送单张图片日报。"""
 
         urls = self._source_urls()
         logger.info(
@@ -91,26 +90,25 @@ class AcgDailyPlugin(Star):
         session_key = event.unified_msg_origin
         lock = self._session_locks.setdefault(session_key, asyncio.Lock())
         async with lock:
-            cached = self._cached_nodes(session_key)
+            cached = self._cached_image(session_key)
             if cached is not None:
                 logger.info("ACG 日报：命中冷却缓存，直接返回 %s 的上次日报。", session_key)
-                yield event.chain_result([Nodes(nodes=cached)])
+                yield event.image_result(cached)
                 return
 
             try:
-                nodes = await self._create_daily_nodes(event, urls)
+                image = await self._create_daily_image(event, urls)
             except Exception as exc:
                 logger.exception("ACG 日报：生成失败。")
                 yield event.plain_result(f"生成 ACG 日报失败：{exc}")
                 return
 
-            self._cache[session_key] = CacheEntry(time.monotonic(), nodes)
+            self._cache[session_key] = CacheEntry(time.monotonic(), image)
             logger.info(
-                "ACG 日报：已为 %s 生成日报，共 %d 个合并转发节点。",
+                "ACG 日报：已为 %s 生成单张图片日报。",
                 session_key,
-                len(nodes),
             )
-            yield event.chain_result([Nodes(nodes=nodes)])
+            yield event.image_result(image)
 
     def _source_urls(self) -> list[str]:
         configured = self.config.get("news_source_urls", [])
@@ -125,18 +123,18 @@ class AcgDailyPlugin(Star):
                 urls.append(url)
         return urls[:20]
 
-    def _cached_nodes(self, session_key: str) -> list[Node] | None:
+    def _cached_image(self, session_key: str) -> str | None:
         cooldown = max(0, int(self.config.get("cooldown_seconds", 60)))
         entry = self._cache.get(session_key)
         if not entry or cooldown == 0 or time.monotonic() - entry.created_at > cooldown:
             return None
-        return copy.deepcopy(entry.nodes)
+        return entry.image
 
-    async def _create_daily_nodes(
+    async def _create_daily_image(
         self,
         event: AstrMessageEvent,
         urls: list[str],
-    ) -> list[Node]:
+    ) -> str:
         scraper = NewsScraper(
             timeout_seconds=int(self.config.get("request_timeout_seconds", 10)),
             max_articles_per_source=int(self.config.get("max_articles_per_source", 10)),
@@ -155,11 +153,19 @@ class AcgDailyPlugin(Star):
         )
         if not articles:
             logger.warning("ACG 日报：没有提取到可用资讯。")
-            return self._empty_nodes(event, results)
+            return await self._render_daily_image(
+                DailyEdition("本次未从已配置资讯源中提取到可用资讯。", []),
+                [],
+                {},
+                results,
+            )
 
-        max_items = max(1, min(int(self.config.get("max_daily_items", 7)), 12))
+        max_items = max(1, min(int(self.config.get("max_daily_items", 8)), 8))
         edition = await self._edit_with_current_model(event, articles, max_items)
-        return self._build_nodes(event, results, articles, edition)
+        selected_ids = {item.article_id for item in edition.items}
+        selected = [article for article in articles if article.id in selected_ids]
+        cover_images = await scraper.fetch_cover_images(selected)
+        return await self._render_daily_image(edition, articles, cover_images, results)
 
     async def _edit_with_current_model(
         self,
@@ -243,70 +249,26 @@ class AcgDailyPlugin(Star):
         logger.info("ACG 日报：已为编辑模型注入网页搜索工具「%s」。", tool_name)
         return ToolSet([SingleUseSearchTool(tool)])
 
-    def _build_nodes(
+    async def _render_daily_image(
         self,
-        event: AstrMessageEvent,
-        results: list[SourceResult],
-        articles: list[Article],
         edition: DailyEdition,
-    ) -> list[Node]:
-        bot_uin = event.get_self_id() or "0"
-        node_name = str(self.config.get("node_name", "ACG 日报")).strip() or "ACG 日报"
+        articles: list[Article],
+        cover_images: dict[int, str],
+        results: list[SourceResult],
+    ) -> str:
         success_count = sum(1 for result in results if result.articles)
-        article_by_id = {article.id: article for article in articles}
         date_text = datetime.now().astimezone().strftime("%Y 年 %m 月 %d 日")
-        intro = edition.intro or "为你整理今日值得关注的 ACG 动态。"
-        nodes = [
-            Node(
-                uin=bot_uin,
-                name=node_name,
-                content=[
-                    Plain(f"ACG 日报 | {date_text}\n"),
-                    Plain(f"本次抓取：{success_count}/{len(results)} 个来源可用，候选 {len(articles)} 条。\n"),
-                    Plain(intro),
-                ],
-            ),
-        ]
-        for item in edition.items:
-            article = article_by_id[item.article_id]
-            content = f"[{item.category}] {item.title}\n{item.summary}"
-            if item.reason:
-                content += f"\n关注点：{item.reason}"
-            content += f"\n来源：{article.source}\n原文：{article.url}"
-            nodes.append(Node(uin=bot_uin, name=node_name, content=[Plain(content)]))
-        if not edition.items:
-            nodes.append(
-                Node(
-                    uin=bot_uin,
-                    name=node_name,
-                    content=[Plain("本次没有筛选出适合收录的资讯。可稍后再试，或调整资讯源链接。")],
-                ),
-            )
-        nodes.append(
-            Node(
-                uin=bot_uin,
-                name=node_name,
-                content=[Plain("内容由已配置资讯源即时抓取，并由 AI 筛选和整理。请以原文为准。")],
-            ),
+        source_status = f"本次抓取 {success_count}/{len(results)} 个来源，筛选 {len(edition.items)} 条资讯"
+        html = build_daily_image_html(
+            edition,
+            articles,
+            cover_images,
+            date_text,
+            source_status,
         )
-        logger.info(
-            "ACG 日报：已从 %d 条入选资讯构造 %d 个合并转发节点。",
-            len(nodes),
-            len(edition.items),
+        logger.info("ACG 日报：正在将 %d 条资讯渲染为单张图片。", len(edition.items))
+        return await self.html_render(
+            html,
+            {},
+            options={"type": "jpeg", "quality": 88, "full_page": True, "animations": "disabled"},
         )
-        return nodes
-
-    def _empty_nodes(self, event: AstrMessageEvent, results: list[SourceResult]) -> list[Node]:
-        bot_uin = event.get_self_id() or "0"
-        node_name = str(self.config.get("node_name", "ACG 日报")).strip() or "ACG 日报"
-        unavailable = sum(1 for result in results if result.error)
-        return [
-            Node(
-                uin=bot_uin,
-                name=node_name,
-                content=[
-                    Plain("ACG 日报\n"),
-                    Plain(f"本次未从 {len(results)} 个资讯源中提取到可用资讯，其中 {unavailable} 个来源不可用。"),
-                ],
-            ),
-        ]

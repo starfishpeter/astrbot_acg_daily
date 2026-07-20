@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import ipaddress
 import logging
 import re
@@ -21,6 +22,7 @@ from bs4 import BeautifulSoup
 from .models import Article
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_IMAGE_BYTES = 1024 * 1024
 MAX_REDIRECTS = 3
 # Some public feeds, including Bahamut GNN, block unknown bot user agents while
 # serving their public RSS normally to browser-compatible clients.
@@ -194,11 +196,66 @@ def _feed_value(entry: object, name: str, default: object = "") -> object:
     return getattr(entry, name, default)
 
 
+def _image_url(value: object, source_url: str) -> str:
+    if not value:
+        return ""
+    url = urljoin(source_url, str(value))
+    return url if is_http_url(url) else ""
+
+
+def _first_image_url(value: object, source_url: str) -> str:
+    soup = BeautifulSoup(str(value or ""), "html.parser")
+    for image in soup.find_all("img"):
+        for attribute in ("src", "data-src", "data-lazy-src"):
+            url = _image_url(image.get(attribute), source_url)
+            if url:
+                return url
+    return ""
+
+
+def _feed_cover_url(entry: object, source_url: str) -> str:
+    """Extract a feed-supplied cover without fetching an article page."""
+
+    for field in ("media_content", "media_thumbnail", "enclosures"):
+        value = _feed_value(entry, field, [])
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if isinstance(item, dict):
+                url = _image_url(item.get("url") or item.get("href"), source_url)
+                if url:
+                    return url
+
+    links = _feed_value(entry, "links", [])
+    if isinstance(links, list):
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            if str(link.get("type", "")).lower().startswith("image/"):
+                url = _image_url(link.get("href"), source_url)
+                if url:
+                    return url
+
+    for field in ("content", "summary", "description"):
+        value = _feed_value(entry, field, "")
+        if isinstance(value, list):
+            for item in value:
+                url = _first_image_url(_feed_value(item, "value", ""), source_url)
+                if url:
+                    return url
+        else:
+            url = _first_image_url(value, source_url)
+            if url:
+                return url
+    return ""
+
+
 def _feed_entries(body: bytes, source_url: str, limit: int) -> tuple[str, list[Article]]:
     feed = feedparser.parse(body)
     entries = list(getattr(feed, "entries", []) or [])
-    version = str(getattr(feed, "version", "") or "")
-    if not version or not entries:
+    # RSS 1.0/RDF feeds report versions such as ``rss10``. They are common on
+    # Japanese anime sites, so only require a parsed entry list here.
+    if not entries:
         return "", []
 
     feed_info = getattr(feed, "feed", {})
@@ -232,6 +289,7 @@ def _feed_entries(body: bytes, source_url: str, limit: int) -> tuple[str, list[A
                     or _feed_value(entry, "updated", ""),
                     80,
                 ),
+                cover_url=_feed_cover_url(entry, source_url),
             ),
         )
     return source_name, articles
@@ -278,7 +336,15 @@ def _article_from_container(
             time_node.get("datetime") or time_node.get_text(" ", strip=True),
             80,
         )
-    return Article(0, title, summary, link, source_name, published_at)
+    return Article(
+        0,
+        title,
+        summary,
+        link,
+        source_name,
+        published_at,
+        _first_image_url(container, source_url),
+    )
 
 
 def _html_entries(body: bytes, source_url: str, limit: int) -> tuple[str, list[Article]]:
@@ -318,6 +384,7 @@ def _html_entries(body: bytes, source_url: str, limit: int) -> tuple[str, list[A
                 clean_text(summary_node, 700) if summary_node else "",
                 link,
                 source_name,
+                cover_url=_first_image_url(parent, source_url) if parent else "",
             ),
         )
         seen_links.add(link)
@@ -359,7 +426,15 @@ def deduplicate_articles(
         if len(unique) >= max_candidates:
             break
     return [
-        Article(index, item.title, item.summary, item.url, item.source, item.published_at)
+        Article(
+            index,
+            item.title,
+            item.summary,
+            item.url,
+            item.source,
+            item.published_at,
+            item.cover_url,
+        )
         for index, item in enumerate(unique, start=1)
     ]
 
@@ -409,6 +484,63 @@ class NewsScraper:
                     len(result.articles),
                 )
         return normalized
+
+    async def fetch_cover_images(self, articles: list[Article]) -> dict[int, str]:
+        """Download selected article covers as safe, bounded data URLs for T2I."""
+
+        candidates = [article for article in articles if article.cover_url]
+        if not candidates:
+            return {}
+
+        timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
+        headers = {"User-Agent": USER_AGENT, "Accept": "image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8"}
+        connector = aiohttp.TCPConnector(resolver=PublicAddressResolver())
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            headers=headers,
+            connector=connector,
+        ) as session:
+            images = await asyncio.gather(
+                *(self._fetch_cover_image(session, article) for article in candidates),
+                return_exceptions=True,
+            )
+
+        result: dict[int, str] = {}
+        for article, image in zip(candidates, images):
+            if isinstance(image, str) and image:
+                result[article.id] = image
+            elif isinstance(image, Exception):
+                logger.info("ACG 日报：未使用资讯封面（%s）：%s", article.source, image)
+        return result
+
+    async def _fetch_cover_image(
+        self,
+        session: aiohttp.ClientSession,
+        article: Article,
+    ) -> str:
+        current_url = article.cover_url
+        for _ in range(MAX_REDIRECTS + 1):
+            await validate_source_url(current_url)
+            async with session.get(current_url, allow_redirects=False) as response:
+                if response.status in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise ValueError("cover redirect response has no Location header")
+                    current_url = urljoin(current_url, location)
+                    continue
+                if response.status != 200:
+                    raise ValueError(f"cover HTTP {response.status}")
+                content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+                if content_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+                    raise ValueError("cover response is not a supported image")
+                if response.content_length is not None and response.content_length > MAX_IMAGE_BYTES:
+                    raise ValueError("cover exceeds the 1 MiB limit")
+                body = await response.content.read(MAX_IMAGE_BYTES + 1)
+                if len(body) > MAX_IMAGE_BYTES:
+                    raise ValueError("cover exceeds the 1 MiB limit")
+                encoded = base64.b64encode(body).decode("ascii")
+                return f"data:{content_type};base64,{encoded}"
+        raise ValueError("too many cover redirects")
 
     async def _collect_one(
         self,

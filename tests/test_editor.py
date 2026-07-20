@@ -34,6 +34,8 @@ class EditorTests(unittest.TestCase):
         self.assertIn("优先采用候选中已有的简体中文标题", SYSTEM_PROMPT)
         self.assertIn("保留原文名", SYSTEM_PROMPT)
         self.assertIn("一次日报最多调用一次搜索工具", SYSTEM_PROMPT)
+        self.assertIn("偏二次元社群的日报", SYSTEM_PROMPT)
+        self.assertIn("排除硬件参数", SYSTEM_PROMPT)
 
     def test_parse_edition_rejects_unknown_and_duplicate_ids(self):
         response = """```json
