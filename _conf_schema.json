@@ -56,7 +56,7 @@
   "daily_publish_group_whitelist": {
     "type": "list",
     "description": "定时发布群聊白名单",
-    "hint": "每行填写一个允许接收定时日报的群聊 unified_msg_origin，格式必须为 platform:GroupMessage:session_id，例如 aiocqhttp:GroupMessage:123456789。白名单以外的群聊和所有私聊不会收到定时日报。先在目标群执行一次 /acg日报，再从 AstrBot 日志的“收到来自 ... 的命令”一行复制完整值。",
+    "hint": "每行填写一个允许接收定时日报的 QQ 群号，例如 123456789。也兼容 aiocqhttp:GroupMessage:123456789 格式。插件会将群号自动转换为 AstrBot 发送目标；白名单以外的群聊和所有私聊不会收到定时日报。",
     "default": []
   },
   "daily_publish_timezone": {

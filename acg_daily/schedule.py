@@ -8,6 +8,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _DAILY_TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 _GROUP_MESSAGE_TYPE = "GroupMessage"
+_QQ_GROUP_NUMBER_PATTERN = re.compile(r"^\d+$")
+_AIOCQHTTP_PLATFORM = "aiocqhttp"
 
 
 @dataclass(frozen=True)
@@ -44,7 +46,7 @@ def parse_daily_publish_time(value: object) -> DailyPublishTime | None:
 
 
 def parse_publish_group_target(value: object) -> str:
-    """Validate one group-only unified message origin for proactive sending."""
+    """Normalize a QQ group number or group-only message origin for sending."""
 
     if not isinstance(value, str):
         raise ValueError("定时发布群聊白名单中的目标必须是文本")
@@ -53,12 +55,18 @@ def parse_publish_group_target(value: object) -> str:
     target = value.strip()
     if not target:
         raise ValueError("定时发布群聊白名单中不能包含空目标")
+    if _QQ_GROUP_NUMBER_PATTERN.fullmatch(target):
+        return f"{_AIOCQHTTP_PLATFORM}:{_GROUP_MESSAGE_TYPE}:{target}"
     parts = target.split(":")
     if len(parts) != 3 or not all(parts):
-        raise ValueError("定时发布群聊白名单必须是 platform:GroupMessage:session_id 格式")
-    _platform, message_type, _session_id = parts
+        raise ValueError("定时发布群聊白名单必须是 QQ 群号或 aiocqhttp:GroupMessage:群号 格式")
+    platform, message_type, session_id = parts
+    if platform != _AIOCQHTTP_PLATFORM:
+        raise ValueError("定时发布群聊白名单只支持 aiocqhttp 平台或直接填写 QQ 群号")
     if message_type != _GROUP_MESSAGE_TYPE:
         raise ValueError("定时发布群聊白名单只允许 GroupMessage 群聊目标")
+    if not _QQ_GROUP_NUMBER_PATTERN.fullmatch(session_id):
+        raise ValueError("定时发布群聊白名单中的群号必须仅包含数字")
     if any(part != part.strip() for part in parts):
         raise ValueError("定时发布群聊白名单中的目标不能包含首尾空白字符")
     return target

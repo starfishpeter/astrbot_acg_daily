@@ -29,11 +29,11 @@ class DailyPublishScheduleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "HH:MM"):
             parse_daily_publish_time("06:00:00")
 
-    def test_publish_whitelist_allows_only_group_message_origins(self):
+    def test_publish_whitelist_accepts_group_numbers_and_normalizes_origins(self):
         self.assertEqual(
             parse_publish_group_whitelist(
                 [
-                    "aiocqhttp:GroupMessage:123456789",
+                    "123456789",
                     "aiocqhttp:GroupMessage:123456789",
                     "aiocqhttp:GroupMessage:987654321",
                 ]
@@ -45,10 +45,11 @@ class DailyPublishScheduleTests(unittest.TestCase):
         )
         for whitelist in (
             "aiocqhttp:GroupMessage:123456789",
-            ["123456789"],
+            ["group-123456789"],
             ["aiocqhttp:FriendMessage:123"],
+            ["satori:GroupMessage:123"],
             ["aiocqhttp:GroupMessage:"],
-            ["aiocqhttp:GroupMessage:group:123"],
+            ["aiocqhttp:GroupMessage:group123"],
             [" aiocqhttp:GroupMessage:123"],
         ):
             with self.subTest(whitelist=whitelist), self.assertRaises(ValueError):
@@ -66,7 +67,7 @@ class DailyPublishScheduleTests(unittest.TestCase):
                 "enable_daily_publish": True,
                 "daily_publish_time": "06:00",
                 "daily_publish_group_whitelist": [
-                    "aiocqhttp:GroupMessage:123456789",
+                    "123456789",
                     "aiocqhttp:GroupMessage:987654321",
                 ],
                 "daily_publish_timezone": "Asia/Shanghai",
