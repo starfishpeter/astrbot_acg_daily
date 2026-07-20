@@ -44,6 +44,29 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("已跳过未经翻译的原始候选", source)
         self.assertNotIn("fallback_edition(articles, max_items)", source)
 
+    def test_optional_editor_provider_overrides_the_current_session_model(self):
+        source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
+        schema = (Path(__file__).parent.parent / "_conf_schema.json").read_text(encoding="utf-8")
+
+        self.assertIn("configured_editor_provider", source)
+        self.assertIn("使用配置指定的编辑模型", source)
+        self.assertEqual(source.count("chat_provider_id=provider_id"), 3)
+        self.assertIn('"editor_provider"', schema)
+        self.assertIn('"_special": "select_provider"', schema)
+
+    def test_ranking_titles_share_the_primary_editor_call_and_tool_budget(self):
+        source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
+        editor_source = (Path(__file__).parent.parent / "acg_daily" / "editor.py").read_text(encoding="utf-8")
+
+        self.assertIn("_fetch_daily_ranking()", source)
+        self.assertIn("_edit_with_current_model(event, articles, max_items, ranking)", source)
+        self.assertIn("parse_edition_with_ranking", source)
+        self.assertIn("排行榜标题翻译失败，已跳过榜单", source)
+        self.assertIn("共用编辑模型中文化标题", source)
+        self.assertIn("两者共用最多 10 次联网名称核对", source)
+        self.assertIn("编辑模型已中文化", source)
+        self.assertIn("新闻和排行榜作品名共用单次日报最多 10 次", editor_source)
+
 
 if __name__ == "__main__":
     unittest.main()

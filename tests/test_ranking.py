@@ -6,6 +6,7 @@ from acg_daily.ranking import (
     Ranking,
     RankingEntry,
     _anime_hack_ranking,
+    parse_translated_ranking_items,
 )
 
 
@@ -44,6 +45,25 @@ class RankingTests(unittest.TestCase):
         )
 
         self.assertEqual(len(ranking.entries[:10]), 10)
+
+    def test_ranking_translation_requires_all_original_ranks_and_preserves_details(self):
+        ranking = Ranking(
+            "测试榜单",
+            "测试来源",
+            (RankingEntry(1, "Original One", "TV · 2026"), RankingEntry(2, "Original Two", "TV · 2025")),
+        )
+
+        translated = parse_translated_ranking_items(
+            [{"rank": 2, "title": "作品二"}, {"rank": 1, "title": "作品一"}],
+            ranking,
+        )
+
+        self.assertEqual(
+            [(entry.rank, entry.title, entry.detail) for entry in translated.entries],
+            [(1, "作品一", "TV · 2026"), (2, "作品二", "TV · 2025")],
+        )
+        with self.assertRaises(ValueError):
+            parse_translated_ranking_items([{"rank": 1, "title": "作品一"}], ranking)
 
 
 if __name__ == "__main__":

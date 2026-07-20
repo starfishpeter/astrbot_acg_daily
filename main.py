@@ -14,8 +14,10 @@ from astrbot.core.agent.tool import FunctionTool, ToolSet
 
 from .acg_daily.editor import (
     build_editor_prompt,
+    configured_editor_provider,
     configured_system_prompt,
     parse_edition,
+    parse_edition_with_ranking,
 )
 from .acg_daily.image_report import build_daily_image_html, normalize_cover_data_uri
 from .acg_daily.models import Article, DailyEdition
@@ -321,10 +323,12 @@ class AcgDailyPlugin(Star):
                 [],
                 {},
                 results,
+                None,
             )
 
         max_items = max(1, min(int(self.config.get("max_daily_items", 12)), 12))
-        edition = await self._edit_with_current_model(event, articles, max_items)
+        ranking = await self._fetch_daily_ranking()
+        edition, ranking = await self._edit_with_current_model(event, articles, max_items, ranking)
         selected_ids = {item.article_id for item in edition.items}
         selected = [article for article in articles if article.id in selected_ids]
         raw_cover_images = await scraper.fetch_cover_images(selected)
@@ -334,29 +338,44 @@ class AcgDailyPlugin(Star):
             len(selected),
             len(cover_images),
         )
-        return await self._render_daily_images(edition, articles, cover_images, results)
+        return await self._render_daily_images(edition, articles, cover_images, results, ranking)
 
     async def _edit_with_current_model(
         self,
         event: AstrMessageEvent,
         articles: list[Article],
         max_items: int,
-    ) -> DailyEdition:
+        ranking: Ranking | None,
+    ) -> tuple[DailyEdition, Ranking | None]:
         try:
-            provider_id = await self.context.get_current_chat_provider_id(event.unified_msg_origin)
+            configured_provider_id = configured_editor_provider(self.config.get("editor_provider"))
+            if configured_provider_id:
+                provider_id = configured_provider_id
+                logger.info("ACG 日报：使用配置指定的编辑模型 %s。", provider_id)
+            else:
+                provider_id = await self.context.get_current_chat_provider_id(event.unified_msg_origin)
+                logger.info("ACG 日报：使用当前会话的编辑模型 %s。", provider_id)
             system_prompt = configured_system_prompt(self.config.get("editor_system_prompt"))
-            prompt = build_editor_prompt(articles, max_items)
+            prompt = build_editor_prompt(articles, max_items, ranking)
             search_tools = self._search_tools(event)
         except Exception as exc:
             logger.error("ACG 日报：无法准备编辑模型，已跳过未经翻译的原始候选：%s", exc)
-            return DailyEdition("无法准备日报编辑模型，本次未展示未经翻译的原始候选。", [])
+            return DailyEdition("无法准备日报编辑模型，本次未展示未经翻译的原始候选。", []), None
         try:
             if search_tools:
-                logger.info(
-                    "ACG 日报：使用模型 %s 编辑 %d 条候选资讯，已允许其在必要时进行最多 10 次联网名称核对。",
-                    provider_id,
-                    len(articles),
-                )
+                if ranking is not None:
+                    logger.info(
+                        "ACG 日报：使用模型 %s 编辑 %d 条候选资讯并翻译 %d 条排行榜标题；两者共用最多 10 次联网名称核对。",
+                        provider_id,
+                        len(articles),
+                        len(ranking.entries),
+                    )
+                else:
+                    logger.info(
+                        "ACG 日报：使用模型 %s 编辑 %d 条候选资讯，已允许其在必要时进行最多 10 次联网名称核对。",
+                        provider_id,
+                        len(articles),
+                    )
                 response = await self.context.tool_loop_agent(
                     event=event,
                     chat_provider_id=provider_id,
@@ -378,18 +397,27 @@ class AcgDailyPlugin(Star):
                     system_prompt=system_prompt,
                     prompt=prompt,
                 )
-            edition = parse_edition(response.completion_text, articles, max_items)
+            edition, translated_ranking, ranking_error = parse_edition_with_ranking(
+                response.completion_text,
+                articles,
+                max_items,
+                ranking,
+            )
             logger.info(
                 "ACG 日报：编辑模型返回 %d 条有效入选资讯。",
                 len(edition.items),
             )
+            if ranking_error:
+                logger.warning("ACG 日报：排行榜标题翻译失败，已跳过榜单：%s", ranking_error)
+            elif translated_ranking is not None:
+                logger.info("ACG 日报：编辑模型已中文化 %d 条排行榜标题。", len(translated_ranking.entries))
             if edition.items:
-                return edition
-            return DailyEdition(edition.intro or "本次候选资讯中没有适合收录的内容。", [])
+                return edition, translated_ranking
+            return DailyEdition(edition.intro or "本次候选资讯中没有适合收录的内容。", []), translated_ranking
         except Exception as exc:
             if not search_tools:
                 logger.error("ACG 日报：编辑模型未返回合规 JSON，已跳过未经翻译的原始候选：%s", exc)
-                return DailyEdition("编辑模型未返回合规的日报内容，本次未展示未经翻译的原始候选。", [])
+                return DailyEdition("编辑模型未返回合规的日报内容，本次未展示未经翻译的原始候选。", []), None
             logger.warning(
                 "ACG 日报：带联网工具的编辑未返回合规 JSON，将使用同一模型进行一次无工具重试：%s",
                 exc,
@@ -400,15 +428,24 @@ class AcgDailyPlugin(Star):
                 system_prompt=system_prompt,
                 prompt=prompt,
             )
-            edition = parse_edition(response.completion_text, articles, max_items)
+            edition, translated_ranking, ranking_error = parse_edition_with_ranking(
+                response.completion_text,
+                articles,
+                max_items,
+                ranking,
+            )
             logger.info("ACG 日报：无工具重试成功，编辑模型返回 %d 条有效入选资讯。", len(edition.items))
-            return DailyEdition(edition.intro or "本次候选资讯中没有适合收录的内容。", edition.items)
+            if ranking_error:
+                logger.warning("ACG 日报：排行榜标题翻译失败，已跳过榜单：%s", ranking_error)
+            elif translated_ranking is not None:
+                logger.info("ACG 日报：无工具重试已中文化 %d 条排行榜标题。", len(translated_ranking.entries))
+            return DailyEdition(edition.intro or "本次候选资讯中没有适合收录的内容。", edition.items), translated_ranking
         except Exception as retry_exc:
             logger.error(
                 "ACG 日报：无工具重试仍未返回合规 JSON，已跳过未经翻译的原始候选：%s",
                 retry_exc,
             )
-            return DailyEdition("编辑模型未返回合规的日报内容，本次未展示未经翻译的原始候选。", [])
+            return DailyEdition("编辑模型未返回合规的日报内容，本次未展示未经翻译的原始候选。", []), None
 
     def _search_tools(self, event: AstrMessageEvent) -> ToolSet | None:
         if not self.config.get("enable_web_search", False):
@@ -465,11 +502,11 @@ class AcgDailyPlugin(Star):
         articles: list[Article],
         cover_images: dict[int, str],
         results: list[SourceResult],
+        ranking: Ranking | None,
     ) -> list[str]:
         success_count = sum(1 for result in results if result.articles)
         date_text = datetime.now().astimezone().strftime("%Y 年 %m 月 %d 日")
         source_status = f"本次抓取 {success_count}/{len(results)} 个来源，筛选 {len(edition.items)} 条资讯"
-        ranking = await self._fetch_daily_ranking()
         html = build_daily_image_html(
             edition,
             articles,
@@ -513,5 +550,5 @@ class AcgDailyPlugin(Star):
         if ranking is None:
             logger.warning("ACG 日报：未知的排行榜来源「%s」，已跳过榜单。", source_key)
             return None
-        logger.info("ACG 日报：已获取排行榜「%s」，共 %d 条。", ranking.source, len(ranking.entries))
+        logger.info("ACG 日报：已获取排行榜「%s」，共 %d 条，将与新闻共用编辑模型中文化标题。", ranking.source, len(ranking.entries))
         return ranking

@@ -5,10 +5,13 @@ from pathlib import Path
 from acg_daily.editor import (
     SYSTEM_PROMPT,
     build_editor_prompt,
+    configured_editor_provider,
     configured_system_prompt,
     parse_edition,
+    parse_edition_with_ranking,
 )
 from acg_daily.models import Article
+from acg_daily.ranking import Ranking, RankingEntry
 
 
 class EditorTests(unittest.TestCase):
@@ -37,23 +40,27 @@ class EditorTests(unittest.TestCase):
         self.assertIn('"source":"Example News"', prompt)
         self.assertNotIn("https://example.com/one", prompt)
 
-    def test_editor_prompt_requires_chinese_title_handling(self):
-        self.assertIn("必须以简体中文为主体", SYSTEM_PROMPT)
-        self.assertIn("不得以外文作品名作为标题主体", SYSTEM_PROMPT)
+    def test_editor_prompt_uses_a_core_acg_group_perspective(self):
+        self.assertIn("中国大陆 QQ 核心二次元群", SYSTEM_PROMPT)
+        self.assertIn("番剧、漫画和轻小说相关资讯最优先", SYSTEM_PROMPT)
+        self.assertIn("二次元游戏相关报道", SYSTEM_PROMPT)
+        self.assertIn("自然简洁的简体中文", SYSTEM_PROMPT)
         self.assertIn("单次日报最多 10 次", SYSTEM_PROMPT)
-        self.assertIn("综合 ACG 日报", SYSTEM_PROMPT)
-        self.assertIn("排除硬件参数", SYSTEM_PROMPT)
-        self.assertIn("Steam 促销", SYSTEM_PROMPT)
-        self.assertIn("成人向或露骨题材", SYSTEM_PROMPT)
-        self.assertIn("重大公开个人消息", SYSTEM_PROMPT)
-        self.assertIn("覆盖至少 3 个来源", SYSTEM_PROMPT)
-        self.assertIn("游戏取舍首先看二次元关联度", SYSTEM_PROMPT)
-        self.assertIn("泛 MMO、泛黑暗奇幻 ARPG、普通独立游戏", SYSTEM_PROMPT)
+        self.assertIn("联网只用于核对译名", SYSTEM_PROMPT)
+        self.assertIn("新闻和排行榜作品名共用", SYSTEM_PROMPT)
+        self.assertIn("ranking_items", SYSTEM_PROMPT)
+        self.assertIn("Fate、VTuber", SYSTEM_PROMPT)
+        self.assertIn("不得补充候选没有提供的事实", SYSTEM_PROMPT)
 
     def test_configured_system_prompt_uses_nonempty_override(self):
         self.assertEqual(configured_system_prompt("  Custom policy  "), "Custom policy")
         self.assertEqual(configured_system_prompt("\n\t"), SYSTEM_PROMPT)
         self.assertEqual(configured_system_prompt(None), SYSTEM_PROMPT)
+
+    def test_configured_editor_provider_uses_an_optional_fixed_provider(self):
+        self.assertEqual(configured_editor_provider("  deepseek/deepseek-v4-pro  "), "deepseek/deepseek-v4-pro")
+        self.assertIsNone(configured_editor_provider("\n\t"))
+        self.assertIsNone(configured_editor_provider(None))
 
     def test_schema_default_matches_editor_prompt(self):
         schema_path = Path(__file__).parent.parent / "_conf_schema.json"
@@ -86,6 +93,26 @@ class EditorTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             parse_edition(response, self.articles, 5)
+
+    def test_editor_response_translates_ranking_with_the_news_in_one_json_object(self):
+        ranking = Ranking(
+            "测试榜单",
+            "测试来源",
+            (RankingEntry(1, "Original One", "TV · 2026"), RankingEntry(2, "Original Two", "TV · 2025")),
+        )
+        prompt = build_editor_prompt(self.articles, 5, ranking)
+        edition, translated, error = parse_edition_with_ranking(
+            '{"intro":"导语","items":[{"article_id":1,"category":"动画","title":"标题","summary":"新闻摘要","reason":"新消息"}],"ranking_items":[{"rank":1,"title":"作品一"},{"rank":2,"title":"作品二"}]}',
+            self.articles,
+            5,
+            ranking,
+        )
+
+        self.assertIn("排行榜 JSON", prompt)
+        self.assertIn('"rank":1', prompt)
+        self.assertEqual(edition.items[0].title, "标题")
+        self.assertEqual(error, "")
+        self.assertEqual([entry.title for entry in translated.entries], ["作品一", "作品二"])
 
 
 if __name__ == "__main__":

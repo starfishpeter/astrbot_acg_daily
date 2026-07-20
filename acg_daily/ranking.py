@@ -8,7 +8,7 @@ from typing import Callable
 import aiohttp
 from bs4 import BeautifulSoup
 
-from .scraper import PublicAddressResolver, USER_AGENT, _read_source_response
+from .scraper import PublicAddressResolver, USER_AGENT, _read_source_response, clean_text
 
 
 RANKING_SOURCE_DISABLED = "disabled"
@@ -118,6 +118,34 @@ def _anime_hack_ranking(body: bytes) -> list[RankingEntry]:
                 return entries
         return entries
     return []
+
+
+def parse_translated_ranking_items(raw_items: object, ranking: Ranking) -> Ranking:
+    """Accept translations only when every original rank is preserved exactly once."""
+
+    if not isinstance(raw_items, list):
+        raise ValueError("排行榜翻译未返回 ranking_items 列表")
+
+    expected_ranks = {entry.rank for entry in ranking.entries}
+    translated_titles: dict[int, str] = {}
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        rank = item.get("rank")
+        title = clean_text(item.get("title"), 120)
+        if not isinstance(rank, int) or rank not in expected_ranks or rank in translated_titles or not title:
+            raise ValueError("排行榜翻译包含无效名次或标题")
+        translated_titles[rank] = title
+    if set(translated_titles) != expected_ranks:
+        raise ValueError("排行榜翻译未覆盖全部名次")
+    return Ranking(
+        ranking.title,
+        ranking.source,
+        tuple(
+            RankingEntry(entry.rank, translated_titles[entry.rank], entry.detail)
+            for entry in ranking.entries
+        ),
+    )
 
 
 RANKING_SOURCES = {
