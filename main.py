@@ -12,7 +12,6 @@ from astrbot.api.event import MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.tool import FunctionTool, ToolSet
-from astrbot.core.astr_agent_context import AgentContextWrapper, AstrAgentContext
 
 from .acg_daily.editor import (
     SYSTEM_PROMPT,
@@ -22,6 +21,7 @@ from .acg_daily.editor import (
     editor_response_diagnosis,
     parse_edition,
     parse_edition_with_ranking,
+    prioritize_current_day_items,
 )
 from .acg_daily.image_report import build_daily_image_html, normalize_cover_data_uri
 from .acg_daily.models import Article, DailyEdition
@@ -394,7 +394,25 @@ class AcgDailyPlugin(Star):
         return self._configured_urls("news_source_urls")
 
     def _tavily_extract_source_urls(self) -> list[str]:
+        enabled = self.config.get("enable_tavily_extract_sources", True)
+        if isinstance(enabled, bool) and not enabled:
+            logger.info("ACG 日报：Tavily 提取资讯源已在配置中关闭，本次跳过。")
+            return []
         return self._configured_urls("tavily_extract_source_urls")
+
+    def _tavily_extract_depth(self) -> str:
+        depth = self.config.get("tavily_extract_depth", "advanced")
+        return depth if depth in {"basic", "advanced"} else "advanced"
+
+    def _tavily_api_key(self) -> str:
+        configured_key = self.config.get("tavily_api_key", "")
+        return configured_key.strip() if isinstance(configured_key, str) else ""
+
+    def _tavily_request_timeout_seconds(self) -> int:
+        try:
+            return max(1, min(int(self.config.get("tavily_request_timeout_seconds", 60)), 60))
+        except (TypeError, ValueError):
+            return 60
 
     def _configured_urls(self, setting_name: str) -> list[str]:
         configured = self.config.get(setting_name, [])
@@ -476,7 +494,7 @@ class AcgDailyPlugin(Star):
             max_articles_per_source=int(self.config.get("max_articles_per_source", 10)),
         )
         results = await scraper.collect(urls)
-        results.extend(await self._collect_tavily_extract_sources(event, tavily_urls))
+        results.extend(await self._collect_tavily_extract_sources(tavily_urls))
         articles = deduplicate_articles(
             [article for result in results for article in result.articles],
             max_candidates=max(1, min(int(self.config.get("max_candidates", 40)), 80)),
@@ -594,6 +612,7 @@ class AcgDailyPlugin(Star):
                 max_items,
                 ranking,
             )
+            edition = prioritize_current_day_items(edition, articles)
             logger.info(
                 "ACG 日报：编辑模型返回 %d 条有效入选资讯。",
                 len(edition.items),
@@ -632,6 +651,7 @@ class AcgDailyPlugin(Star):
                 max_items,
                 ranking,
             )
+            edition = prioritize_current_day_items(edition, articles)
             logger.info("ACG 日报：无工具重试成功，编辑模型返回 %d 条有效入选资讯。", len(edition.items))
             self._log_title_translation_references(edition, articles, translated_ranking, ranking, title_lookup_tool)
             if ranking_error:
@@ -706,26 +726,19 @@ class AcgDailyPlugin(Star):
 
     async def _collect_tavily_extract_sources(
         self,
-        event: AstrMessageEvent,
         urls: list[str],
     ) -> list[SourceResult]:
         if not urls:
             return []
-        try:
-            tool = self.context.get_llm_tool_manager().get_builtin_tool("tavily_extract_web_page")
-        except (KeyError, TypeError) as exc:
-            logger.warning("ACG 日报：无法加载 AstrBot Tavily 页面提取工具：%s", exc)
-            return [SourceResult(url, "Tavily", [], "Tavily 页面提取工具不可用") for url in urls]
-        if not getattr(tool, "active", True):
-            logger.warning("ACG 日报：AstrBot Tavily 页面提取工具当前未启用。")
-            return [SourceResult(url, "Tavily", [], "Tavily 页面提取工具未启用") for url in urls]
-
-        agent_context = AgentContextWrapper(AstrAgentContext(context=self.context, event=event))
+        api_key = self._tavily_api_key()
+        if not api_key:
+            logger.warning("ACG 日报：Tavily 提取资讯源已配置，但 Tavily API Key 为空。")
         results = await collect_tavily_extract_sources(
             urls,
-            tool,
-            agent_context,
-            int(self.config.get("max_articles_per_source", 10)),
+            api_key,
+            self._tavily_request_timeout_seconds(),
+            int(self.config.get("tavily_max_articles_per_source", 40)),
+            self._tavily_extract_depth(),
         )
         for result in results:
             if result.error:

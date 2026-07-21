@@ -360,8 +360,10 @@ class ScraperTests(unittest.TestCase):
             Content:
             # Latest news
             ## [First announcement](https://example.com/news/first)
+            ![First cover](https://images.example/first.jpg)
             2026-07-21 First summary.
             ## [Second announcement](https://example.com/news/second)
+            ![Second cover](/images/second.jpg)
             2026-07-21 Second summary.
             """,
             "https://example.com/news",
@@ -375,6 +377,29 @@ class ScraperTests(unittest.TestCase):
             "https://example.com/news/second",
         ])
         self.assertEqual([article.published_at for article in articles], ["2026-07-21", "2026-07-21"])
+        self.assertEqual([article.cover_url for article in articles], [
+            "https://images.example/first.jpg",
+            "https://example.com/images/second.jpg",
+        ])
+
+    def test_tavily_page_images_fill_only_missing_list_entry_covers(self):
+        _source_name, articles = tavily_extract_entries(
+            """# Latest news
+            ## [First announcement](https://example.com/news/first)
+            ![First cover](https://images.example/first.jpg)
+            First summary.
+            ## [Second announcement](https://example.com/news/second)
+            Second summary.
+            """,
+            "https://example.com/news",
+            10,
+            images=["https://images.example/page-first.jpg", "https://images.example/page-second.jpg"],
+        )
+
+        self.assertEqual([article.cover_url for article in articles], [
+            "https://images.example/first.jpg",
+            "https://images.example/page-second.jpg",
+        ])
 
     def test_tavily_extract_rejects_error_and_malformed_responses(self):
         for response in ("Error: Tavily API key is not configured in AstrBot.", "URL: https://example.com"):
@@ -383,29 +408,112 @@ class ScraperTests(unittest.TestCase):
 
                 self.assertEqual(articles, [])
 
-    def test_tavily_extract_collection_calls_each_url_and_keeps_failures_isolated(self):
-        class Tool:
+    def test_tavily_extract_collection_batches_urls_requests_images_and_keeps_failures_isolated(self):
+        class Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def json(self):
+                return {
+                    "results": [{
+                        "url": "https://example.com/first",
+                        "raw_content": "# First item\n\nFirst summary.",
+                        "images": [],
+                    }],
+                    "failed_results": [{"url": "https://example.com/failed", "error": "blocked"}],
+                }
+
+        class Session:
             def __init__(self):
                 self.calls = []
 
-            async def call(self, context, **kwargs):
-                self.calls.append((context, kwargs))
-                if kwargs["url"].endswith("failed"):
-                    raise RuntimeError("Tavily unavailable")
-                return "URL: https://example.com/first\nContent: # First item\n\nFirst summary."
+            async def __aenter__(self):
+                return self
 
-        tool = Tool()
+            async def __aexit__(self, *_args):
+                return None
+
+            def post(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return Response()
+
+        session = Session()
         urls = ["https://example.com/first", "https://example.com/failed"]
-        with patch("acg_daily.scraper.validate_source_url", new=AsyncMock()):
-            results = asyncio.run(collect_tavily_extract_sources(urls, tool, "context", 10))
+        with (
+            patch("acg_daily.scraper.validate_source_url", new=AsyncMock()),
+            patch("acg_daily.scraper.aiohttp.ClientSession", return_value=session),
+        ):
+            results = asyncio.run(collect_tavily_extract_sources(urls, "secret", 60, 10))
 
-        self.assertEqual([call[1] for call in tool.calls], [
-            {"url": "https://example.com/first", "extract_depth": "basic"},
-            {"url": "https://example.com/failed", "extract_depth": "basic"},
-        ])
+        self.assertEqual(session.calls, [(
+            "https://api.tavily.com/extract",
+            {"json": {
+                "urls": urls,
+                "extract_depth": "advanced",
+                "include_images": True,
+                "include_favicon": True,
+                "format": "markdown",
+            }},
+        )])
         self.assertEqual(results[0].articles[0].title, "First item")
         self.assertEqual(results[1].articles, [])
-        self.assertEqual(results[1].error, "Tavily unavailable")
+        self.assertEqual(results[1].error, "blocked")
+
+    def test_tavily_collection_allows_up_to_forty_candidates_per_source(self):
+        content = "\n".join(
+            f"## [Item {index}](https://example.com/news/{index})\nSummary {index}."
+            for index in range(1, 51)
+        )
+
+        class Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def json(self):
+                return {"results": [{
+                    "url": "https://example.com/news",
+                    "raw_content": content,
+                    "images": [],
+                }]}
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def post(self, *_args, **_kwargs):
+                return Response()
+
+        with (
+            patch("acg_daily.scraper.validate_source_url", new=AsyncMock()),
+            patch("acg_daily.scraper.aiohttp.ClientSession", return_value=Session()),
+        ):
+            results = asyncio.run(
+                collect_tavily_extract_sources(["https://example.com/news"], "secret", 60, 99),
+            )
+
+        self.assertEqual(len(results[0].articles), 40)
+        self.assertEqual(results[0].articles[-1].title, "Item 40")
+
+    def test_tavily_extract_collection_does_not_request_when_key_is_missing(self):
+        results = asyncio.run(
+            collect_tavily_extract_sources(["https://example.com/news"], "", 60, 10),
+        )
+
+        self.assertEqual(results[0].articles, [])
+        self.assertEqual(results[0].error, "Tavily API Key 未配置")
 
     def test_tavily_candidates_are_deduplicated_with_standard_sources(self):
         _name, tavily_articles = tavily_extract_entries(

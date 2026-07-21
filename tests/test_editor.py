@@ -1,6 +1,7 @@
 import json
 import re
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from acg_daily.editor import (
@@ -11,6 +12,7 @@ from acg_daily.editor import (
     configured_editor_provider,
     parse_edition,
     parse_edition_with_ranking,
+    prioritize_current_day_items,
 )
 from acg_daily.models import Article
 from acg_daily.ranking import Ranking, RankingEntry
@@ -41,12 +43,14 @@ class EditorTests(unittest.TestCase):
         self.assertIn('"id":1', prompt)
         self.assertIn('"title":"Original announcement"', prompt)
         self.assertIn('"summary":"A source summary."', prompt)
+        self.assertIn('"published_at":""', prompt)
         self.assertNotIn('"source"', prompt)
         self.assertNotIn("https://example.com/one", prompt)
 
     def test_editor_prompt_uses_a_core_acg_group_perspective(self):
         self.assertIn("中国大陆 QQ 核心二次元群", SYSTEM_PROMPT)
         self.assertIn("番剧、漫画和轻小说相关资讯最优先", SYSTEM_PROMPT)
+        self.assertIn("当天发布的内容优先于较早内容", SYSTEM_PROMPT)
         self.assertIn("二次元游戏相关报道", SYSTEM_PROMPT)
         self.assertIn("自然简洁的简体中文", SYSTEM_PROMPT)
         self.assertIn("只可调用一次“批量译名核对”工具", SYSTEM_PROMPT)
@@ -67,8 +71,19 @@ class EditorTests(unittest.TestCase):
         prompt = build_editor_prompt([article], 1)
 
         self.assertIn('"summary":"' + "x" * 160 + '"', prompt)
+        self.assertIn('"published_at":"2026-07-21"', prompt)
         self.assertNotIn("Example News", prompt)
-        self.assertNotIn("2026-07-21", prompt)
+
+    def test_prompt_includes_the_server_local_date_and_current_day_ordering_rule(self):
+        prompt = build_editor_prompt(
+            self.articles,
+            5,
+            now=datetime(2026, 7, 21, 9, 30, tzinfo=timezone(timedelta(hours=8))),
+        )
+
+        self.assertIn("服务器本地日期是 2026-07-21", prompt)
+        self.assertIn("优先选择当天发布的内容", prompt)
+        self.assertIn("items 必须先列当天内容", prompt)
 
     def test_retry_prompt_keeps_completed_title_lookups_and_requires_json_contract(self):
         prompt = build_editor_retry_prompt("候选资讯", "Bangumi 词条候选\n- 原名 -> 中文名")
@@ -162,6 +177,29 @@ class EditorTests(unittest.TestCase):
         for response in responses:
             with self.subTest(response=response), self.assertRaises(ValueError):
                 parse_edition(response, self.articles, 5)
+
+    def test_current_day_items_are_moved_ahead_of_older_items_without_reordering_each_group(self):
+        local_now = datetime(2026, 7, 21, 10, tzinfo=timezone(timedelta(hours=8)))
+        articles = [
+            Article(1, "Yesterday", "", "https://example.com/one", "Example", "2026-07-20"),
+            Article(2, "Today first", "", "https://example.com/two", "Example", "2026-07-21T01:00:00Z"),
+            Article(3, "Today second", "", "https://example.com/three", "Example", "Mon, 20 Jul 2026 21:00:00 -0400"),
+            Article(4, "No date", "", "https://example.com/four", "Example"),
+        ]
+        edition = parse_edition(
+            '{"intro":"导语","items":['
+            '{"article_id":1,"category":"动画","title":"昨天","summary":"昨天的消息"},'
+            '{"article_id":4,"category":"动画","title":"未知","summary":"日期未知"},'
+            '{"article_id":3,"category":"动画","title":"今天二","summary":"今天第二条"},'
+            '{"article_id":2,"category":"动画","title":"今天一","summary":"今天第一条"}'
+            ']}',
+            articles,
+            5,
+        )
+
+        prioritized = prioritize_current_day_items(edition, articles, now=local_now)
+
+        self.assertEqual([item.article_id for item in prioritized.items], [3, 2, 1, 4])
 
     def test_editor_response_translates_ranking_with_the_news_in_one_json_object(self):
         ranking = Ranking(

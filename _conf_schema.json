@@ -8,8 +8,39 @@
   "tavily_extract_source_urls": {
     "type": "list",
     "description": "Tavily 提取资讯源",
-    "hint": "每行填写一个需要由 AstrBot 内置 Tavily 页面提取工具读取的公开 http(s) 新闻列表页 URL。适合服务器无法直连的来源；可直连的 RSS/Atom 请填在“资讯源链接”。每个 URL 独立提取为候选材料，不进行关键词搜索；列表页会按提取内容中的文章链接拆分候选，Tavily 返回完整 RSS/Atom/RDF 时也会按订阅条目解析。需先在 AstrBot 全局设置启用 Tavily 网页搜索并配置密钥。",
+    "hint": "每行填写一个由插件直接通过 Tavily Extract API 读取的公开 http(s) 新闻列表页 URL。适合服务器无法直连的来源；可直连的 RSS/Atom 请填在“资讯源链接”。插件会批量请求最多 20 个 URL，按列表页文章链接拆分候选，并请求 Tavily 的图片结果作为封面回退。不进行关键词搜索，也不使用 AstrBot 内置 Tavily 工具。",
     "default": []
+  },
+  "tavily_api_key": {
+    "type": "string",
+    "description": "Tavily API Key",
+    "hint": "用于插件直接调用 Tavily Extract API，仅作为 Authorization 请求头使用，不会写入模型提示词、工具结果、日志或日报图片。仅在启用 Tavily 提取资讯源且配置了 URL 时需要填写；可使用与 AstrBot 全局 Tavily 相同的密钥。",
+    "default": ""
+  },
+  "tavily_request_timeout_seconds": {
+    "type": "int",
+    "description": "Tavily 批量提取超时（秒）",
+    "hint": "插件对最多 20 个 Tavily 来源发起一次批量 Extract 请求的总等待时间，范围 1-60。默认 60；超时仅跳过该批 Tavily 来源，不影响普通资讯源。",
+    "default": 60
+  },
+  "enable_tavily_extract_sources": {
+    "type": "bool",
+    "description": "启用 Tavily 提取资讯源",
+    "hint": "关闭后完全跳过“Tavily 提取资讯源”中的 URL，不调用 Tavily，也不影响普通资讯源。适合临时停用 Tavily 请求或排查来源问题。",
+    "default": true
+  },
+  "tavily_max_articles_per_source": {
+    "type": "int",
+    "description": "Tavily 单来源最大候选数",
+    "hint": "Tavily 列表页一次提取后，单个 URL 最多保留多少个识别到的资讯链接，范围 1-40。默认 40，会使用高级页面提取以尽量保留列表内容；实际数量仍取决于 Tavily 返回的页面内容。所有来源最终仍受“编辑前最大候选数”限制。",
+    "default": 40
+  },
+  "tavily_extract_depth": {
+    "type": "string",
+    "description": "Tavily 页面提取深度",
+    "hint": "advanced（默认）尽量提取单个列表页的完整内容、嵌入内容和表格，但每 5 个成功 URL 消耗 2 个 Tavily credits；basic 每 5 个成功 URL 消耗 1 个 credit。插件会将最多 20 个已配置 URL 合并为一次 Tavily Extract 请求并请求图片；不会自动翻页或 Crawl 整个站点。",
+    "options": ["advanced", "basic"],
+    "default": "advanced"
   },
   "max_articles_per_source": {
     "type": "int",
