@@ -18,7 +18,6 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("_await_editor_response", source)
         self.assertIn("editor_slow_warning_seconds", source)
         self.assertNotIn("enable_web_search", source)
-        self.assertNotIn("web_search_tavily", source)
 
     def test_scheduled_publish_uses_context_send_message_and_lifecycle_hooks(self):
         source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
@@ -45,6 +44,15 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("渲染单张长图", source)
         self.assertIn("return [image]", source)
         self.assertNotIn("items_per_page", source)
+
+    def test_debug_command_probes_sources_and_covers_without_editing_or_rendering(self):
+        source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn('mode: str = ""', source)
+        self.assertIn('mode == "debug"', source)
+        self.assertIn("_source_debug_report", source)
+        self.assertIn("scraper.fetch_cover_images", source)
+        self.assertIn("format_source_diagnostics", source)
 
     def test_reloaded_plugin_instance_discards_in_flight_results_before_sending(self):
         source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
@@ -91,36 +99,6 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("必要时仅进行一次批量译名核对", source)
         self.assertIn("编辑模型已中文化", source)
         self.assertIn("只可调用一次“批量译名核对”工具", editor_source)
-
-    def test_tavily_extract_sources_are_distinct_from_standard_rss_and_html_sources(self):
-        source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
-        scraper_source = (Path(__file__).parent.parent / "acg_daily" / "scraper.py").read_text(encoding="utf-8")
-        schema = (Path(__file__).parent.parent / "_conf_schema.json").read_text(encoding="utf-8")
-
-        self.assertIn("tavily_extract_source_urls", source)
-        self.assertIn("tavily_api_key", source)
-        self.assertIn("tavily_request_timeout_seconds", source)
-        self.assertIn("enable_tavily_extract_sources", source)
-        self.assertIn("tavily_max_articles_per_source", source)
-        self.assertIn("tavily_extract_depth", source)
-        self.assertIn("collect_tavily_extract_sources", source)
-        self.assertIn("validate_source_url(url)", scraper_source)
-        self.assertIn("tavily_extract_entries", scraper_source)
-        self.assertIn('"include_images": True', scraper_source)
-        self.assertIn('"include_favicon": True', scraper_source)
-        self.assertIn('"urls": batch', scraper_source)
-        self.assertNotIn("tavily_extract_web_page", source)
-        self.assertNotIn("AgentContextWrapper", source)
-        self.assertIn('"tavily_extract_source_urls"', schema)
-        self.assertIn('"tavily_api_key"', schema)
-        self.assertIn('"tavily_request_timeout_seconds"', schema)
-        self.assertIn('"enable_tavily_extract_sources"', schema)
-        self.assertIn('"tavily_max_articles_per_source"', schema)
-        self.assertIn('"tavily_extract_depth"', schema)
-        self.assertNotIn('"editor_system_prompt"', schema)
-        self.assertNotIn('"daily_publish_timezone"', schema)
-        self.assertNotIn('"enable_web_search"', schema)
-
 
 if __name__ == "__main__":
     unittest.main()

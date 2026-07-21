@@ -1,6 +1,7 @@
 import base64
 import io
 import unittest
+from datetime import datetime
 
 from PIL import Image
 
@@ -38,6 +39,7 @@ class ImageReportTests(unittest.TestCase):
             "",
             "https://example.com/private-link",
             "Example <Source>",
+            "2026-07-20T23:30:00+00:00",
         )
         edition = DailyEdition(
             "<daily intro>",
@@ -64,10 +66,21 @@ class ImageReportTests(unittest.TestCase):
         self.assertIn('class="story-card feature with-cover accent-1"', html)
         self.assertIn("次元放送局", html)
         self.assertIn("Example &lt;Source&gt;", html)
+        expected_date = datetime.fromisoformat("2026-07-20T23:30:00+00:00").astimezone().strftime("%Y-%m-%d")
+        self.assertIn(expected_date, html)
         self.assertIn("A &lt; B", html)
         self.assertIn("Summary &amp; detail", html)
         self.assertNotIn("private-link", html)
         self.assertNotIn("https://example.com", html)
+
+    def test_report_marks_missing_publication_dates_without_exposing_article_urls(self):
+        edition = DailyEdition("", [EditedItem(1, "动画", "标题", "摘要", "")])
+        article = Article(1, "原标题", "", "https://example.com/private-link", "来源")
+
+        html = build_daily_image_html(edition, [article], {}, "日期", "状态")
+
+        self.assertIn('class="story-published">日期未知</span>', html)
+        self.assertNotIn("private-link", html)
 
     def test_report_uses_placeholder_without_cover(self):
         edition = DailyEdition("", [EditedItem(1, "漫画", "标题", "摘要", "")])

@@ -30,8 +30,8 @@ from .acg_daily.schedule import DailyPublishSettings, parse_daily_publish_settin
 from .acg_daily.scraper import (
     NewsScraper,
     SourceResult,
-    collect_tavily_extract_sources,
     deduplicate_articles,
+    format_source_diagnostics,
     is_http_url,
 )
 from .acg_daily.title_lookup import (
@@ -190,27 +190,40 @@ class AcgDailyPlugin(Star):
         logger.info("ACG 日报：插件实例已停止，进行中的旧任务完成后不会再发送结果。")
 
     @filter.command("acg日报", alias={"ACG日报"})
-    async def acg_daily(self, event: AstrMessageEvent):
-        """即时抓取已配置的 ACG 资讯源并发送单张长图日报。"""
+    async def acg_daily(self, event: AstrMessageEvent, mode: str = ""):
+        """即时生成日报；添加 debug 参数可诊断资讯源和封面下载。"""
 
         if not self._can_send_result("命令执行"):
             return
+        mode = mode.casefold()
+        if mode and mode != "debug":
+            yield event.plain_result("用法：/acg日报 或 /acg日报 debug")
+            return
         urls = self._source_urls()
-        tavily_urls = self._tavily_extract_source_urls()
         logger.info(
-            "ACG 日报：收到来自 %s 的命令，当前配置了 %d 个普通资讯源和 %d 个 Tavily 提取源。",
+            "ACG 日报：收到来自 %s 的命令，当前配置了 %d 个资讯源。",
             event.unified_msg_origin,
             len(urls),
-            len(tavily_urls),
         )
-        if not urls and not tavily_urls:
+        if not urls:
             logger.warning("ACG 日报：没有配置有效的资讯源链接。")
-            yield event.plain_result("请先在「资讯源链接」或「Tavily 提取资讯源」中至少添加一个 http(s) URL。")
+            yield event.plain_result("请先在「资讯源链接」中至少添加一个 http(s) URL。")
             return
 
         session_key = event.unified_msg_origin
         lock = self._session_locks.setdefault(session_key, asyncio.Lock())
         async with lock:
+            if mode == "debug":
+                try:
+                    diagnostic = await self._source_debug_report(urls)
+                except Exception as exc:
+                    logger.exception("ACG 日报：订阅源诊断失败。")
+                    yield event.plain_result(f"ACG 日报订阅源诊断失败：{exc}")
+                    return
+                if self._can_send_result("订阅源诊断"):
+                    yield event.plain_result(diagnostic)
+                return
+
             cached = self._cached_image(session_key)
             if cached is not None:
                 if not self._can_send_result("缓存日报"):
@@ -221,7 +234,7 @@ class AcgDailyPlugin(Star):
                 return
 
             try:
-                images = await self._create_daily_images(event, urls, tavily_urls)
+                images = await self._create_daily_images(event, urls)
             except Exception as exc:
                 logger.exception("ACG 日报：生成失败。")
                 yield event.plain_result(f"生成 ACG 日报失败：{exc}")
@@ -308,25 +321,22 @@ class AcgDailyPlugin(Star):
         targets: tuple[str, ...],
     ) -> None:
         urls = self._source_urls()
-        tavily_urls = self._tavily_extract_source_urls()
         logger.info(
-            "ACG 日报：定时发布触发，将发送至 %d 个白名单群聊，当前配置 %d 个普通资讯源和 %d 个 Tavily 提取源。",
+            "ACG 日报：定时发布触发，将发送至 %d 个白名单群聊，当前配置 %d 个资讯源。",
             len(targets),
             len(urls),
-            len(tavily_urls),
         )
-        if not urls and not tavily_urls:
+        if not urls:
             logger.warning("ACG 日报：定时发布已跳过，未配置有效资讯源。")
             return
 
         for target in targets:
-            await self._publish_scheduled_daily_to_group(target, urls, tavily_urls)
+            await self._publish_scheduled_daily_to_group(target, urls)
 
     async def _publish_scheduled_daily_to_group(
         self,
         target: str,
         urls: list[str],
-        tavily_urls: list[str],
     ) -> None:
         try:
             resolved_target = self._resolve_scheduled_publish_target(target)
@@ -344,7 +354,7 @@ class AcgDailyPlugin(Star):
         async with lock:
             started_at = time.monotonic()
             try:
-                images = await self._create_daily_images_for_session(target, urls, tavily_urls)
+                images = await self._create_daily_images_for_session(target, urls)
                 if not self._can_send_result("定时日报"):
                     return
                 logger.info(
@@ -385,34 +395,12 @@ class AcgDailyPlugin(Star):
         self,
         session_key: str,
         urls: list[str],
-        tavily_urls: list[str],
     ) -> list[str]:
         event = _ScheduledDailyEvent(session_key)
-        return await self._create_daily_images(event, urls, tavily_urls)
+        return await self._create_daily_images(event, urls)
 
     def _source_urls(self) -> list[str]:
         return self._configured_urls("news_source_urls")
-
-    def _tavily_extract_source_urls(self) -> list[str]:
-        enabled = self.config.get("enable_tavily_extract_sources", True)
-        if isinstance(enabled, bool) and not enabled:
-            logger.info("ACG 日报：Tavily 提取资讯源已在配置中关闭，本次跳过。")
-            return []
-        return self._configured_urls("tavily_extract_source_urls")
-
-    def _tavily_extract_depth(self) -> str:
-        depth = self.config.get("tavily_extract_depth", "advanced")
-        return depth if depth in {"basic", "advanced"} else "advanced"
-
-    def _tavily_api_key(self) -> str:
-        configured_key = self.config.get("tavily_api_key", "")
-        return configured_key.strip() if isinstance(configured_key, str) else ""
-
-    def _tavily_request_timeout_seconds(self) -> int:
-        try:
-            return max(1, min(int(self.config.get("tavily_request_timeout_seconds", 60)), 60))
-        except (TypeError, ValueError):
-            return 60
 
     def _configured_urls(self, setting_name: str) -> list[str]:
         configured = self.config.get(setting_name, [])
@@ -487,14 +475,12 @@ class AcgDailyPlugin(Star):
         self,
         event: AstrMessageEvent,
         urls: list[str],
-        tavily_urls: list[str],
     ) -> list[str]:
         scraper = NewsScraper(
             timeout_seconds=int(self.config.get("request_timeout_seconds", 10)),
             max_articles_per_source=int(self.config.get("max_articles_per_source", 10)),
         )
         results = await scraper.collect(urls)
-        results.extend(await self._collect_tavily_extract_sources(tavily_urls))
         articles = deduplicate_articles(
             [article for result in results for article in result.articles],
             max_candidates=max(1, min(int(self.config.get("max_candidates", 40)), 80)),
@@ -529,6 +515,27 @@ class AcgDailyPlugin(Star):
             len(cover_images),
         )
         return await self._render_daily_images(edition, articles, cover_images, results, ranking)
+
+    async def _source_debug_report(self, urls: list[str]) -> str:
+        """Probe configured sources and article cover downloads without editing or rendering."""
+
+        scraper = NewsScraper(
+            timeout_seconds=int(self.config.get("request_timeout_seconds", 10)),
+            max_articles_per_source=int(self.config.get("max_articles_per_source", 10)),
+        )
+        results = await scraper.collect(urls)
+        cover_results = await asyncio.gather(
+            *(scraper.fetch_cover_images(result.articles) for result in results if result.articles),
+        )
+        cover_counts = {
+            result.url: len(covers)
+            for result, covers in zip((result for result in results if result.articles), cover_results)
+        }
+        articles = deduplicate_articles(
+            [article for result in results for article in result.articles],
+            max_candidates=max(1, min(int(self.config.get("max_candidates", 40)), 80)),
+        )
+        return format_source_diagnostics(results, cover_counts, len(articles))
 
     async def _edit_with_current_model(
         self,
@@ -723,29 +730,6 @@ class AcgDailyPlugin(Star):
             bangumi_access_token,
             int(self.config.get("request_timeout_seconds", 10)),
         )
-
-    async def _collect_tavily_extract_sources(
-        self,
-        urls: list[str],
-    ) -> list[SourceResult]:
-        if not urls:
-            return []
-        api_key = self._tavily_api_key()
-        if not api_key:
-            logger.warning("ACG 日报：Tavily 提取资讯源已配置，但 Tavily API Key 为空。")
-        results = await collect_tavily_extract_sources(
-            urls,
-            api_key,
-            self._tavily_request_timeout_seconds(),
-            int(self.config.get("tavily_max_articles_per_source", 40)),
-            self._tavily_extract_depth(),
-        )
-        for result in results:
-            if result.error:
-                logger.warning("ACG 日报：Tavily 资讯源提取失败（%s）：%s", result.url, result.error)
-            else:
-                logger.info("ACG 日报：Tavily 资讯源提取成功（%s），获得 %d 条资讯。", result.source_name, len(result.articles))
-        return results
 
     async def _prepare_cover_images(self, covers: dict[int, str]) -> dict[int, str]:
         """Adapt downloaded covers for Chromium before putting them in HTML."""

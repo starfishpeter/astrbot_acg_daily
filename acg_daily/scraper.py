@@ -22,9 +22,6 @@ from bs4 import BeautifulSoup
 from .models import Article
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-MAX_TAVILY_EXTRACT_CHARS = 60_000
-MAX_TAVILY_ARTICLES_PER_SOURCE = 40
-MAX_TAVILY_URLS_PER_REQUEST = 20
 # Covers are decoded and recompressed before rendering. Allow a reasonable
 # source-file size here so common 1200px+ publisher artwork is not discarded.
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
@@ -508,252 +505,6 @@ def _html_entries(body: bytes, source_url: str, limit: int) -> tuple[str, list[A
     return source_name, articles
 
 
-_TAVILY_MARKDOWN_LINK = re.compile(r"(?<!!)\[([^\]]+)\]\(([^\s)]+)(?:\s+[^)]*)?\)")
-_TAVILY_MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\(([^\s)]+)(?:\s+[^)]*)?\)")
-_TAVILY_MARKDOWN_BLOCK = re.compile(r"(?m)(?=^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+))")
-_TAVILY_GENERIC_LINK_TITLES = {"more", "read more", "details", "link"}
-
-
-def _tavily_list_entries(raw_content: str, source_url: str, source_name: str, limit: int) -> list[Article]:
-    """Extract linked list entries from Tavily's Markdown-like page content."""
-
-    articles: list[Article] = []
-    seen_urls: set[str] = set()
-    for block in _TAVILY_MARKDOWN_BLOCK.split(raw_content):
-        link = _TAVILY_MARKDOWN_LINK.search(block)
-        if link is None:
-            continue
-        title = clean_text(link.group(1), 200)
-        url = canonical_url(urljoin(source_url, link.group(2)))
-        if not title or not url or url in seen_urls:
-            continue
-        heading = re.match(r"\s*#{1,6}\s+(.+?)(?:\n|$)", block)
-        heading_title = clean_text(
-            _TAVILY_MARKDOWN_LINK.sub(r"\1", heading.group(1)) if heading else "",
-            200,
-        )
-        if title.casefold() in _TAVILY_GENERIC_LINK_TITLES and heading_title:
-            title = heading_title
-        plain_block = _TAVILY_MARKDOWN_LINK.sub(r"\1", block)
-        plain_block = re.sub(r"(?m)^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)", "", plain_block)
-        summary = clean_text(plain_block, 2000)
-        if summary.startswith(title):
-            summary = summary[len(title) :].lstrip(" .:-")
-        image = _TAVILY_MARKDOWN_IMAGE.search(block)
-        date = re.search(r"\b20\d{2}[-./]\d{1,2}[-./]\d{1,2}\b", block)
-        articles.append(
-            Article(
-                id=0,
-                title=title,
-                summary=summary[:700] or title,
-                url=url,
-                source=source_name,
-                published_at=date.group(0) if date else "",
-                # The detail page may be blocked to the deployment server even
-                # though its image CDN remains reachable, so retain an image
-                # Tavily exposes with the matching list item as a fallback.
-                cover_url=_image_url(image.group(1), source_url) if image else "",
-            ),
-        )
-        seen_urls.add(url)
-        if len(articles) >= limit:
-            break
-    return articles
-
-
-def tavily_extract_entries(
-    content: object,
-    source_url: str,
-    limit: int,
-    images: object = (),
-) -> tuple[str, list[Article]]:
-    """Turn one Tavily Extract response into bounded untrusted news candidates."""
-
-    if not isinstance(content, str):
-        return "", []
-    raw_content = content.strip()[:MAX_TAVILY_EXTRACT_CHARS]
-    if raw_content.startswith("URL:"):
-        content_marker = re.search(r"(?m)^\s*Content:\s*", raw_content)
-        if content_marker is None:
-            return "", []
-        raw_content = raw_content[content_marker.end() :]
-    raw_content = raw_content.strip()
-    if not raw_content or raw_content.startswith("Error:"):
-        return "", []
-
-    source_name = f"Tavily · {urlsplit(source_url).hostname or source_url}"
-    # Tavily may return the original XML for a configured RSS/Atom/RDF URL.
-    # Reuse the generic feed parser so those entries are not collapsed into one
-    # candidate page merely because their retrieval used Tavily.
-    feed_start = re.search(r"<(?:(?:\?xml\b)|(?:rss\b)|(?:feed\b)|(?:rdf:RDF\b))", raw_content, re.IGNORECASE)
-    if feed_start:
-        feed_name, feed_articles = _feed_entries(
-            raw_content[feed_start.start() :].encode("utf-8"),
-            source_url,
-            limit,
-        )
-        if feed_articles:
-            source_name = f"Tavily · {feed_name}"
-            return (
-                source_name,
-                [
-                    Article(
-                        id=article.id,
-                        title=article.title,
-                        summary=article.summary,
-                        url=article.url,
-                        source=source_name,
-                        published_at=article.published_at,
-                        cover_url=article.cover_url,
-                    )
-                    for article in feed_articles
-                ],
-            )
-
-    list_articles = _tavily_list_entries(raw_content, source_url, source_name, limit)
-    if list_articles:
-        image_urls = [
-            image_url
-            for image in (images if isinstance(images, list) else [])
-            for image_url in [_image_url(image, source_url)]
-            if image_url
-        ]
-        if image_urls:
-            image_index = 0
-            matched_articles: list[Article] = []
-            for article in list_articles:
-                cover_url = article.cover_url
-                page_image = image_urls[image_index] if image_index < len(image_urls) else ""
-                image_index += 1
-                if not cover_url and page_image:
-                    # Tavily exposes page-level images without an article mapping.
-                    # Markdown images inside an entry win; these ordered images are
-                    # only a best-effort fallback for otherwise coverless entries.
-                    cover_url = page_image
-                matched_articles.append(
-                    Article(
-                        id=article.id,
-                        title=article.title,
-                        summary=article.summary,
-                        url=article.url,
-                        source=article.source,
-                        published_at=article.published_at,
-                        cover_url=cover_url,
-                    ),
-                )
-            list_articles = matched_articles
-        return source_name, list_articles
-
-    # Tavily returns Markdown-like raw content. Preserve link labels but discard
-    # syntax so a page heading can become the candidate title.
-    plain_content = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", raw_content)
-    headings = re.findall(r"(?m)^\s*#{1,6}\s+(.+?)\s*$", plain_content)
-    title = clean_text(headings[0], 200) if headings else ""
-    plain_content = re.sub(r"(?m)^\s*#{1,6}\s+", "", plain_content)
-    text = clean_text(plain_content, 2000)
-    if not title:
-        title = clean_text(text.split(". ", 1)[0], 200)
-    if not title:
-        return source_name, []
-    summary = text
-    if summary.startswith(title):
-        summary = summary[len(title) :].lstrip(" .:-")
-    if not summary:
-        summary = title
-    return (
-        source_name,
-        [
-            Article(
-                id=0,
-                title=title,
-                summary=summary[:700],
-                url=canonical_url(source_url),
-                source=source_name,
-            ),
-        ][: max(0, limit)],
-    )
-
-
-async def collect_tavily_extract_sources(
-    urls: list[str],
-    api_key: str,
-    timeout_seconds: int,
-    max_articles_per_source: int,
-    extract_depth: str = "advanced",
-) -> list[SourceResult]:
-    """Extract configured public URLs directly through Tavily's batch Extract API."""
-
-    limit = max(1, min(max_articles_per_source, MAX_TAVILY_ARTICLES_PER_SOURCE))
-    depth = extract_depth if extract_depth in {"basic", "advanced"} else "advanced"
-    if not api_key:
-        return [SourceResult(url, "Tavily", [], "Tavily API Key 未配置") for url in urls]
-
-    validated_urls: list[str] = []
-    invalid_results: dict[str, SourceResult] = {}
-    for url in urls:
-        try:
-            await validate_source_url(url)
-            validated_urls.append(url)
-        except Exception as exc:
-            invalid_results[url] = SourceResult(url, "Tavily", [], str(exc) or type(exc).__name__)
-
-    extracted: dict[str, SourceResult] = {}
-    timeout = aiohttp.ClientTimeout(total=max(1, min(timeout_seconds, 60)))
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    connector = aiohttp.TCPConnector(resolver=PublicAddressResolver())
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as session:
-        for start in range(0, len(validated_urls), MAX_TAVILY_URLS_PER_REQUEST):
-            batch = validated_urls[start : start + MAX_TAVILY_URLS_PER_REQUEST]
-            try:
-                async with session.post(
-                    "https://api.tavily.com/extract",
-                    json={
-                        "urls": batch,
-                        "extract_depth": depth,
-                        "include_images": True,
-                        "include_favicon": True,
-                        "format": "markdown",
-                    },
-                ) as response:
-                    if response.status != 200:
-                        reason = (await response.text())[:500]
-                        raise ValueError(f"Tavily HTTP {response.status}: {reason or 'request failed'}")
-                    payload = await response.json()
-            except Exception as exc:
-                error = str(exc) or type(exc).__name__
-                extracted.update({url: SourceResult(url, "Tavily", [], error) for url in batch})
-                continue
-
-            result_by_url = {
-                canonical_url(str(result.get("url", ""))): result
-                for result in payload.get("results", [])
-                if isinstance(result, dict) and canonical_url(str(result.get("url", "")))
-            }
-            failed_by_url = {
-                canonical_url(str(result.get("url", ""))): str(result.get("error", "Tavily 提取失败"))
-                for result in payload.get("failed_results", [])
-                if isinstance(result, dict) and canonical_url(str(result.get("url", "")))
-            }
-            for url in batch:
-                result = result_by_url.get(canonical_url(url))
-                if result is None:
-                    error = failed_by_url.get(canonical_url(url), "Tavily 未返回此 URL 的提取结果")
-                    extracted[url] = SourceResult(url, "Tavily", [], error)
-                    continue
-                source_name, articles = tavily_extract_entries(
-                    result.get("raw_content"),
-                    url,
-                    limit,
-                    result.get("images", []),
-                )
-                if articles:
-                    extracted[url] = SourceResult(url, source_name, articles)
-                else:
-                    extracted[url] = SourceResult(url, source_name or "Tavily", [], "未从 Tavily 提取结果中识别到资讯内容")
-
-    return [extracted.get(url, invalid_results.get(url, SourceResult(url, "Tavily", [], "未处理"))) for url in urls]
-
-
 def _date_sort_value(value: str) -> float:
     if not value:
         return 0.0
@@ -815,6 +566,34 @@ def deduplicate_articles(
         )
         for index, item in enumerate(balanced, start=1)
     ]
+
+
+def format_source_diagnostics(
+    results: list[SourceResult],
+    cover_counts: dict[str, int],
+    deduplicated_count: int,
+) -> str:
+    """Summarize configured source extraction without exposing article links."""
+
+    raw_count = sum(len(result.articles) for result in results)
+    usable_count = sum(1 for result in results if result.articles)
+    lines = [
+        "ACG 日报订阅源诊断",
+        f"配置 {len(results)} 个来源；可用 {usable_count} 个；原始资讯 {raw_count} 条；去重候选 {deduplicated_count} 条。",
+    ]
+    for result in results:
+        raw_source_name = str(result.source_name or "")
+        if not raw_source_name or raw_source_name == result.url or is_http_url(raw_source_name):
+            source_name = urlsplit(result.url).hostname or result.url
+        else:
+            source_name = clean_text(raw_source_name, 80)
+        if result.error:
+            lines.append(f"- {source_name}：抓取失败（{clean_text(result.error, 160)}）")
+            continue
+        article_count = len(result.articles)
+        cover_count = min(article_count, max(0, cover_counts.get(result.url, 0)))
+        lines.append(f"- {source_name}：资讯 {article_count} 条；封面可下载 {cover_count}/{article_count}。")
+    return "\n".join(lines)
 
 
 class NewsScraper:

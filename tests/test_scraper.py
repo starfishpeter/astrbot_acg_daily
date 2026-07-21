@@ -9,11 +9,11 @@ from acg_daily.scraper import (
     _feed_entries,
     _html_entries,
     canonical_url,
-    collect_tavily_extract_sources,
     deduplicate_articles,
-    tavily_extract_entries,
+    format_source_diagnostics,
     validate_source_url,
     NewsScraper,
+    SourceResult,
 )
 
 
@@ -50,6 +50,20 @@ class ScraperTests(unittest.TestCase):
         self.assertEqual(len(articles), 1)
         self.assertEqual(articles[0].url, "https://example.com/first")
         self.assertEqual(articles[0].summary, "First summary")
+
+    def test_source_diagnostics_summarizes_entries_covers_and_failures_without_article_urls(self):
+        article = Article(1, "Title", "", "https://example.com/news/one", "Example Feed")
+        results = [
+            SourceResult("https://example.com/feed", "Example Feed", [article]),
+            SourceResult("https://broken.example/news", "https://broken.example/news", [], "HTTP 403"),
+        ]
+
+        text = format_source_diagnostics(results, {"https://example.com/feed": 1}, 1)
+
+        self.assertIn("配置 2 个来源；可用 1 个；原始资讯 1 条；去重候选 1 条。", text)
+        self.assertIn("Example Feed：资讯 1 条；封面可下载 1/1。", text)
+        self.assertIn("broken.example：抓取失败（HTTP 403）", text)
+        self.assertNotIn("https://example.com/news/one", text)
 
     def test_rss_removes_generic_news_prefix_from_source_name(self):
         rss = RSS.replace(b"Example Feed", b"News - Example Publisher")
@@ -317,215 +331,6 @@ class ScraperTests(unittest.TestCase):
         self.assertEqual(name, "Example Site")
         self.assertEqual([article.title for article in articles], ["First headline", "Second headline"])
         self.assertEqual(articles[0].url, "https://example.com/news/one")
-
-    def test_tavily_extract_response_becomes_one_untrusted_candidate(self):
-        source_name, articles = tavily_extract_entries(
-            "URL: https://example.com/news\nContent: # Anime Announcement\n\nNew trailer is now available.",
-            "https://example.com/news",
-            10,
-        )
-
-        self.assertEqual(source_name, "Tavily · example.com")
-        self.assertEqual(len(articles), 1)
-        self.assertEqual(articles[0].title, "Anime Announcement")
-        self.assertEqual(articles[0].summary, "New trailer is now available.")
-        self.assertEqual(articles[0].url, "https://example.com/news")
-
-    def test_tavily_extract_response_parses_rss_items_instead_of_collapsing_feed(self):
-        rss = b"""<?xml version="1.0"?>
-        <rss version="2.0"><channel><title>Example Feed</title>
-        <item><title>First Item</title><link>https://example.com/first</link>
-        <description>First summary</description><pubDate>Mon, 20 Jul 2026 10:00:00 +0000</pubDate></item>
-        <item><title>Second Item</title><link>https://example.com/second</link>
-        <description>Second summary</description><pubDate>Mon, 20 Jul 2026 09:00:00 +0000</pubDate></item>
-        </channel></rss>"""
-
-        source_name, articles = tavily_extract_entries(
-            f"URL: https://example.com/feed\nContent:\nThe extracted XML follows.\n{rss.decode()}",
-            "https://example.com/feed",
-            10,
-        )
-
-        self.assertEqual(source_name, "Tavily · Example Feed")
-        self.assertEqual([article.title for article in articles], ["First Item", "Second Item"])
-        self.assertEqual([article.url for article in articles], [
-            "https://example.com/first",
-            "https://example.com/second",
-        ])
-        self.assertEqual(articles[0].published_at, "Mon, 20 Jul 2026 10:00:00 +0000")
-
-    def test_tavily_extract_response_parses_multiple_markdown_list_entries(self):
-        source_name, articles = tavily_extract_entries(
-            """URL: https://example.com/news
-            Content:
-            # Latest news
-            ## [First announcement](https://example.com/news/first)
-            ![First cover](https://images.example/first.jpg)
-            2026-07-21 First summary.
-            ## [Second announcement](https://example.com/news/second)
-            ![Second cover](/images/second.jpg)
-            2026-07-21 Second summary.
-            """,
-            "https://example.com/news",
-            10,
-        )
-
-        self.assertEqual(source_name, "Tavily · example.com")
-        self.assertEqual([article.title for article in articles], ["First announcement", "Second announcement"])
-        self.assertEqual([article.url for article in articles], [
-            "https://example.com/news/first",
-            "https://example.com/news/second",
-        ])
-        self.assertEqual([article.published_at for article in articles], ["2026-07-21", "2026-07-21"])
-        self.assertEqual([article.cover_url for article in articles], [
-            "https://images.example/first.jpg",
-            "https://example.com/images/second.jpg",
-        ])
-
-    def test_tavily_page_images_fill_only_missing_list_entry_covers(self):
-        _source_name, articles = tavily_extract_entries(
-            """# Latest news
-            ## [First announcement](https://example.com/news/first)
-            ![First cover](https://images.example/first.jpg)
-            First summary.
-            ## [Second announcement](https://example.com/news/second)
-            Second summary.
-            """,
-            "https://example.com/news",
-            10,
-            images=["https://images.example/page-first.jpg", "https://images.example/page-second.jpg"],
-        )
-
-        self.assertEqual([article.cover_url for article in articles], [
-            "https://images.example/first.jpg",
-            "https://images.example/page-second.jpg",
-        ])
-
-    def test_tavily_extract_rejects_error_and_malformed_responses(self):
-        for response in ("Error: Tavily API key is not configured in AstrBot.", "URL: https://example.com"):
-            with self.subTest(response=response):
-                _source_name, articles = tavily_extract_entries(response, "https://example.com", 10)
-
-                self.assertEqual(articles, [])
-
-    def test_tavily_extract_collection_batches_urls_requests_images_and_keeps_failures_isolated(self):
-        class Response:
-            status = 200
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return None
-
-            async def json(self):
-                return {
-                    "results": [{
-                        "url": "https://example.com/first",
-                        "raw_content": "# First item\n\nFirst summary.",
-                        "images": [],
-                    }],
-                    "failed_results": [{"url": "https://example.com/failed", "error": "blocked"}],
-                }
-
-        class Session:
-            def __init__(self):
-                self.calls = []
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return None
-
-            def post(self, url, **kwargs):
-                self.calls.append((url, kwargs))
-                return Response()
-
-        session = Session()
-        urls = ["https://example.com/first", "https://example.com/failed"]
-        with (
-            patch("acg_daily.scraper.validate_source_url", new=AsyncMock()),
-            patch("acg_daily.scraper.aiohttp.ClientSession", return_value=session),
-        ):
-            results = asyncio.run(collect_tavily_extract_sources(urls, "secret", 60, 10))
-
-        self.assertEqual(session.calls, [(
-            "https://api.tavily.com/extract",
-            {"json": {
-                "urls": urls,
-                "extract_depth": "advanced",
-                "include_images": True,
-                "include_favicon": True,
-                "format": "markdown",
-            }},
-        )])
-        self.assertEqual(results[0].articles[0].title, "First item")
-        self.assertEqual(results[1].articles, [])
-        self.assertEqual(results[1].error, "blocked")
-
-    def test_tavily_collection_allows_up_to_forty_candidates_per_source(self):
-        content = "\n".join(
-            f"## [Item {index}](https://example.com/news/{index})\nSummary {index}."
-            for index in range(1, 51)
-        )
-
-        class Response:
-            status = 200
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return None
-
-            async def json(self):
-                return {"results": [{
-                    "url": "https://example.com/news",
-                    "raw_content": content,
-                    "images": [],
-                }]}
-
-        class Session:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return None
-
-            def post(self, *_args, **_kwargs):
-                return Response()
-
-        with (
-            patch("acg_daily.scraper.validate_source_url", new=AsyncMock()),
-            patch("acg_daily.scraper.aiohttp.ClientSession", return_value=Session()),
-        ):
-            results = asyncio.run(
-                collect_tavily_extract_sources(["https://example.com/news"], "secret", 60, 99),
-            )
-
-        self.assertEqual(len(results[0].articles), 40)
-        self.assertEqual(results[0].articles[-1].title, "Item 40")
-
-    def test_tavily_extract_collection_does_not_request_when_key_is_missing(self):
-        results = asyncio.run(
-            collect_tavily_extract_sources(["https://example.com/news"], "", 60, 10),
-        )
-
-        self.assertEqual(results[0].articles, [])
-        self.assertEqual(results[0].error, "Tavily API Key 未配置")
-
-    def test_tavily_candidates_are_deduplicated_with_standard_sources(self):
-        _name, tavily_articles = tavily_extract_entries(
-            "URL: https://example.com/news\nContent: # Shared announcement\n\nDetails.",
-            "https://example.com/news",
-            10,
-        )
-        regular = Article(0, "Shared announcement", "Details.", "https://other.example/news", "Regular")
-
-        deduplicated = deduplicate_articles([regular, *tavily_articles], 10)
-
-        self.assertEqual(len(deduplicated), 1)
 
     def test_deduplication_uses_url_and_title(self):
         articles = [

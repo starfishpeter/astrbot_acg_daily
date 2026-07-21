@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import base64
 import io
+import re
 import threading
 import warnings
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 from html import escape
 from pathlib import Path
 
@@ -32,6 +35,24 @@ def _render(template: str, **values: str) -> str:
 def _truncate(value: str, limit: int) -> str:
     value = " ".join(value.split())
     return value if len(value) <= limit else f"{value[:limit].rstrip()}..."
+
+
+def _publication_date(value: str) -> str:
+    """Display a source timestamp as a compact server-local calendar date."""
+
+    if not value:
+        return "日期未知"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            match = re.search(r"\b20\d{2}\s*(?:[-./年])\s*\d{1,2}\s*(?:[-./月])\s*\d{1,2}", value)
+            return match.group(0) if match else "日期未知"
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone()
+    return parsed.strftime("%Y-%m-%d")
 
 
 def normalize_cover_data_uri(cover: str) -> str:
@@ -115,6 +136,7 @@ def _story_card(
         INDEX=f"{index:02d}",
         CATEGORY=escape(_truncate(item.category, 12)),
         SOURCE=escape(source),
+        PUBLISHED=escape(_publication_date(article.published_at)),
         TITLE=escape(_truncate(item.title, 58 if featured else 52)),
         SUMMARY=escape(_truncate(item.summary, 112 if featured else 82)),
         MEDIA=media,
