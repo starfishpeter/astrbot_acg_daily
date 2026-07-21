@@ -52,6 +52,7 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn('mode == "debug"', source)
         self.assertIn("_source_debug_report", source)
         self.assertIn("scraper.fetch_cover_images", source)
+        self.assertIn("result.articles[:1]", source)
         self.assertIn("format_source_diagnostics", source)
 
     def test_reloaded_plugin_instance_discards_in_flight_results_before_sending(self):

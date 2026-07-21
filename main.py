@@ -517,7 +517,7 @@ class AcgDailyPlugin(Star):
         return await self._render_daily_images(edition, articles, cover_images, results, ranking)
 
     async def _source_debug_report(self, urls: list[str]) -> str:
-        """Probe configured sources and article cover downloads without editing or rendering."""
+        """Probe configured sources and one representative cover without editing or rendering."""
 
         scraper = NewsScraper(
             timeout_seconds=int(self.config.get("request_timeout_seconds", 10)),
@@ -525,7 +525,7 @@ class AcgDailyPlugin(Star):
         )
         results = await scraper.collect(urls)
         cover_results = await asyncio.gather(
-            *(scraper.fetch_cover_images(result.articles) for result in results if result.articles),
+            *(scraper.fetch_cover_images(result.articles[:1]) for result in results if result.articles),
         )
         cover_counts = {
             result.url: len(covers)

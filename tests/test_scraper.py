@@ -61,7 +61,7 @@ class ScraperTests(unittest.TestCase):
         text = format_source_diagnostics(results, {"https://example.com/feed": 1}, 1)
 
         self.assertIn("配置 2 个来源；可用 1 个；原始资讯 1 条；去重候选 1 条。", text)
-        self.assertIn("Example Feed：资讯 1 条；封面可下载 1/1。", text)
+        self.assertIn("Example Feed：资讯 1 条；封面抽检（1 条）：可下载。", text)
         self.assertIn("broken.example：抓取失败（HTTP 403）", text)
         self.assertNotIn("https://example.com/news/one", text)
 

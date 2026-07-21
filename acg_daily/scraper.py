@@ -591,8 +591,9 @@ def format_source_diagnostics(
             lines.append(f"- {source_name}：抓取失败（{clean_text(result.error, 160)}）")
             continue
         article_count = len(result.articles)
-        cover_count = min(article_count, max(0, cover_counts.get(result.url, 0)))
-        lines.append(f"- {source_name}：资讯 {article_count} 条；封面可下载 {cover_count}/{article_count}。")
+        sampled_cover_count = min(1, max(0, cover_counts.get(result.url, 0)))
+        cover_status = "可下载" if sampled_cover_count else "不可下载"
+        lines.append(f"- {source_name}：资讯 {article_count} 条；封面抽检（1 条）：{cover_status}。")
     return "\n".join(lines)
 
 
@@ -648,7 +649,7 @@ class NewsScraper:
         if not articles:
             return {}
 
-        logger.info("ACG 日报：开始从 %d 条入选资讯的详情页补全封面。", len(articles))
+        logger.debug("ACG 日报：开始从 %d 条资讯的详情页补全封面。", len(articles))
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
         headers = {
             "User-Agent": USER_AGENT,
@@ -676,8 +677,8 @@ class NewsScraper:
                 else:
                     fallback_covers += 1
             elif isinstance(image, Exception):
-                logger.info("ACG 日报：未使用资讯封面（%s）：%s", article.source, image)
-        logger.info(
+                logger.debug("ACG 日报：未使用资讯封面（%s）：%s", article.source, image)
+        logger.debug(
             "ACG 日报：封面补全完成，详情页封面 %d 张，列表或订阅源回退封面 %d 张，缺失 %d 张。",
             detail_page_covers,
             fallback_covers,
@@ -697,7 +698,7 @@ class NewsScraper:
                 final_url, body, _content_type = await _read_source_response(session, article.url)
             except Exception as exc:
                 last_error = exc
-                logger.info(
+                logger.debug(
                     "ACG 日报：详情页抓取失败（%s｜%s，第 %d/2 次）：%s",
                     article.source,
                     article.title,
@@ -712,13 +713,13 @@ class NewsScraper:
             detail_cover = _article_page_cover_url(body, final_url)
             if detail_cover:
                 cover_urls.append((detail_cover, True))
-                logger.info(
+                logger.debug(
                     "ACG 日报：详情页找到封面候选（%s｜%s）。",
                     article.source,
                     article.title,
                 )
             else:
-                logger.info(
+                logger.debug(
                     "ACG 日报：详情页未找到封面候选，将尝试列表或订阅源封面（%s｜%s）。",
                     article.source,
                     article.title,
@@ -733,7 +734,7 @@ class NewsScraper:
                     return await self._fetch_cover_image(session, cover_url), is_detail_cover
                 except Exception as exc:
                     last_error = exc
-                    logger.info(
+                    logger.debug(
                         "ACG 日报：封面候选下载失败（%s｜%s，%s，%s，第 %d/2 次）：%s",
                         article.source,
                         article.title,
