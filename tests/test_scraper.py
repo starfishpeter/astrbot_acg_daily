@@ -331,6 +331,51 @@ class ScraperTests(unittest.TestCase):
         self.assertEqual(articles[0].summary, "New trailer is now available.")
         self.assertEqual(articles[0].url, "https://example.com/news")
 
+    def test_tavily_extract_response_parses_rss_items_instead_of_collapsing_feed(self):
+        rss = b"""<?xml version="1.0"?>
+        <rss version="2.0"><channel><title>Example Feed</title>
+        <item><title>First Item</title><link>https://example.com/first</link>
+        <description>First summary</description><pubDate>Mon, 20 Jul 2026 10:00:00 +0000</pubDate></item>
+        <item><title>Second Item</title><link>https://example.com/second</link>
+        <description>Second summary</description><pubDate>Mon, 20 Jul 2026 09:00:00 +0000</pubDate></item>
+        </channel></rss>"""
+
+        source_name, articles = tavily_extract_entries(
+            f"URL: https://example.com/feed\nContent:\nThe extracted XML follows.\n{rss.decode()}",
+            "https://example.com/feed",
+            10,
+        )
+
+        self.assertEqual(source_name, "Tavily · Example Feed")
+        self.assertEqual([article.title for article in articles], ["First Item", "Second Item"])
+        self.assertEqual([article.url for article in articles], [
+            "https://example.com/first",
+            "https://example.com/second",
+        ])
+        self.assertEqual(articles[0].published_at, "Mon, 20 Jul 2026 10:00:00 +0000")
+
+    def test_tavily_extract_response_parses_multiple_markdown_list_entries(self):
+        source_name, articles = tavily_extract_entries(
+            """URL: https://example.com/news
+            Content:
+            # Latest news
+            ## [First announcement](https://example.com/news/first)
+            2026-07-21 First summary.
+            ## [Second announcement](https://example.com/news/second)
+            2026-07-21 Second summary.
+            """,
+            "https://example.com/news",
+            10,
+        )
+
+        self.assertEqual(source_name, "Tavily · example.com")
+        self.assertEqual([article.title for article in articles], ["First announcement", "Second announcement"])
+        self.assertEqual([article.url for article in articles], [
+            "https://example.com/news/first",
+            "https://example.com/news/second",
+        ])
+        self.assertEqual([article.published_at for article in articles], ["2026-07-21", "2026-07-21"])
+
     def test_tavily_extract_rejects_error_and_malformed_responses(self):
         for response in ("Error: Tavily API key is not configured in AstrBot.", "URL: https://example.com"):
             with self.subTest(response=response):

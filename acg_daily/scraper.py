@@ -506,21 +506,104 @@ def _html_entries(body: bytes, source_url: str, limit: int) -> tuple[str, list[A
     return source_name, articles
 
 
+_TAVILY_MARKDOWN_LINK = re.compile(r"(?<!!)\[([^\]]+)\]\(([^\s)]+)(?:\s+[^)]*)?\)")
+_TAVILY_MARKDOWN_BLOCK = re.compile(r"(?m)(?=^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+))")
+_TAVILY_GENERIC_LINK_TITLES = {"more", "read more", "details", "link"}
+
+
+def _tavily_list_entries(raw_content: str, source_url: str, source_name: str, limit: int) -> list[Article]:
+    """Extract linked list entries from Tavily's Markdown-like page content."""
+
+    articles: list[Article] = []
+    seen_urls: set[str] = set()
+    for block in _TAVILY_MARKDOWN_BLOCK.split(raw_content):
+        link = _TAVILY_MARKDOWN_LINK.search(block)
+        if link is None:
+            continue
+        title = clean_text(link.group(1), 200)
+        url = canonical_url(urljoin(source_url, link.group(2)))
+        if not title or not url or url in seen_urls:
+            continue
+        heading = re.match(r"\s*#{1,6}\s+(.+?)(?:\n|$)", block)
+        heading_title = clean_text(
+            _TAVILY_MARKDOWN_LINK.sub(r"\1", heading.group(1)) if heading else "",
+            200,
+        )
+        if title.casefold() in _TAVILY_GENERIC_LINK_TITLES and heading_title:
+            title = heading_title
+        plain_block = _TAVILY_MARKDOWN_LINK.sub(r"\1", block)
+        plain_block = re.sub(r"(?m)^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)", "", plain_block)
+        summary = clean_text(plain_block, 2000)
+        if summary.startswith(title):
+            summary = summary[len(title) :].lstrip(" .:-")
+        articles.append(
+            Article(
+                id=0,
+                title=title,
+                summary=summary[:700] or title,
+                url=url,
+                source=source_name,
+                published_at=(
+                    re.search(r"\b20\d{2}[-./]\d{1,2}[-./]\d{1,2}\b", block).group(0)
+                    if re.search(r"\b20\d{2}[-./]\d{1,2}[-./]\d{1,2}\b", block)
+                    else ""
+                ),
+            ),
+        )
+        seen_urls.add(url)
+        if len(articles) >= limit:
+            break
+    return articles
+
+
 def tavily_extract_entries(content: object, source_url: str, limit: int) -> tuple[str, list[Article]]:
-    """Turn one Tavily Extract response into a bounded untrusted news candidate."""
+    """Turn one Tavily Extract response into bounded untrusted news candidates."""
 
     if not isinstance(content, str):
         return "", []
     raw_content = content.strip()[:MAX_TAVILY_EXTRACT_CHARS]
     if raw_content.startswith("URL:"):
-        _url_line, separator, raw_content = raw_content.partition("\nContent:")
-        if not separator:
+        content_marker = re.search(r"(?m)^\s*Content:\s*", raw_content)
+        if content_marker is None:
             return "", []
+        raw_content = raw_content[content_marker.end() :]
     raw_content = raw_content.strip()
     if not raw_content or raw_content.startswith("Error:"):
         return "", []
 
     source_name = f"Tavily · {urlsplit(source_url).hostname or source_url}"
+    # Tavily may return the original XML for a configured RSS/Atom/RDF URL.
+    # Reuse the generic feed parser so those entries are not collapsed into one
+    # candidate page merely because their retrieval used Tavily.
+    feed_start = re.search(r"<(?:(?:\?xml\b)|(?:rss\b)|(?:feed\b)|(?:rdf:RDF\b))", raw_content, re.IGNORECASE)
+    if feed_start:
+        feed_name, feed_articles = _feed_entries(
+            raw_content[feed_start.start() :].encode("utf-8"),
+            source_url,
+            limit,
+        )
+        if feed_articles:
+            source_name = f"Tavily · {feed_name}"
+            return (
+                source_name,
+                [
+                    Article(
+                        id=article.id,
+                        title=article.title,
+                        summary=article.summary,
+                        url=article.url,
+                        source=source_name,
+                        published_at=article.published_at,
+                        cover_url=article.cover_url,
+                    )
+                    for article in feed_articles
+                ],
+            )
+
+    list_articles = _tavily_list_entries(raw_content, source_url, source_name, limit)
+    if list_articles:
+        return source_name, list_articles
+
     # Tavily returns Markdown-like raw content. Preserve link labels but discard
     # syntax so a page heading can become the candidate title.
     plain_content = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", raw_content)
