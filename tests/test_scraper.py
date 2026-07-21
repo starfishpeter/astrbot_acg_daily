@@ -9,7 +9,9 @@ from acg_daily.scraper import (
     _feed_entries,
     _html_entries,
     canonical_url,
+    collect_tavily_extract_sources,
     deduplicate_articles,
+    tavily_extract_entries,
     validate_source_url,
     NewsScraper,
 )
@@ -316,6 +318,62 @@ class ScraperTests(unittest.TestCase):
         self.assertEqual([article.title for article in articles], ["First headline", "Second headline"])
         self.assertEqual(articles[0].url, "https://example.com/news/one")
 
+    def test_tavily_extract_response_becomes_one_untrusted_candidate(self):
+        source_name, articles = tavily_extract_entries(
+            "URL: https://example.com/news\nContent: # Anime Announcement\n\nNew trailer is now available.",
+            "https://example.com/news",
+            10,
+        )
+
+        self.assertEqual(source_name, "Tavily · example.com")
+        self.assertEqual(len(articles), 1)
+        self.assertEqual(articles[0].title, "Anime Announcement")
+        self.assertEqual(articles[0].summary, "New trailer is now available.")
+        self.assertEqual(articles[0].url, "https://example.com/news")
+
+    def test_tavily_extract_rejects_error_and_malformed_responses(self):
+        for response in ("Error: Tavily API key is not configured in AstrBot.", "URL: https://example.com"):
+            with self.subTest(response=response):
+                _source_name, articles = tavily_extract_entries(response, "https://example.com", 10)
+
+                self.assertEqual(articles, [])
+
+    def test_tavily_extract_collection_calls_each_url_and_keeps_failures_isolated(self):
+        class Tool:
+            def __init__(self):
+                self.calls = []
+
+            async def call(self, context, **kwargs):
+                self.calls.append((context, kwargs))
+                if kwargs["url"].endswith("failed"):
+                    raise RuntimeError("Tavily unavailable")
+                return "URL: https://example.com/first\nContent: # First item\n\nFirst summary."
+
+        tool = Tool()
+        urls = ["https://example.com/first", "https://example.com/failed"]
+        with patch("acg_daily.scraper.validate_source_url", new=AsyncMock()):
+            results = asyncio.run(collect_tavily_extract_sources(urls, tool, "context", 10))
+
+        self.assertEqual([call[1] for call in tool.calls], [
+            {"url": "https://example.com/first", "extract_depth": "basic"},
+            {"url": "https://example.com/failed", "extract_depth": "basic"},
+        ])
+        self.assertEqual(results[0].articles[0].title, "First item")
+        self.assertEqual(results[1].articles, [])
+        self.assertEqual(results[1].error, "Tavily unavailable")
+
+    def test_tavily_candidates_are_deduplicated_with_standard_sources(self):
+        _name, tavily_articles = tavily_extract_entries(
+            "URL: https://example.com/news\nContent: # Shared announcement\n\nDetails.",
+            "https://example.com/news",
+            10,
+        )
+        regular = Article(0, "Shared announcement", "Details.", "https://other.example/news", "Regular")
+
+        deduplicated = deduplicate_articles([regular, *tavily_articles], 10)
+
+        self.assertEqual(len(deduplicated), 1)
+
     def test_deduplication_uses_url_and_title(self):
         articles = [
             Article(0, "A title!", "", "https://example.com/a", "One"),
@@ -352,6 +410,10 @@ class ScraperTests(unittest.TestCase):
     def test_private_source_url_is_rejected(self):
         with self.assertRaises(ValueError):
             asyncio.run(validate_source_url("http://127.0.0.1/feed"))
+
+    def test_non_global_carrier_grade_nat_source_url_is_rejected(self):
+        with self.assertRaises(ValueError):
+            asyncio.run(validate_source_url("http://100.64.0.1/feed"))
 
 
 if __name__ == "__main__":

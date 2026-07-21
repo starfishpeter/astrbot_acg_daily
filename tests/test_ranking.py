@@ -6,6 +6,7 @@ from acg_daily.ranking import (
     Ranking,
     RankingEntry,
     _anime_hack_ranking,
+    _anime_trending_ranking,
     parse_translated_ranking_items,
 )
 
@@ -46,6 +47,13 @@ class RankingTests(unittest.TestCase):
 
         self.assertEqual(len(ranking.entries[:10]), 10)
 
+    def test_anime_trending_skips_malformed_choices_and_boolean_positions(self):
+        payload = b'''<script id="__NEXT_DATA__">{"props":{"pageProps":{"charts":[{"choices":[null,{"position":true,"name":"Invalid"},{"position":1,"name":"Anime One","subText":"TV"}]}]}}}</script>'''
+
+        entries = _anime_trending_ranking(payload)
+
+        self.assertEqual(entries, [RankingEntry(1, "Anime One", "TV")])
+
     def test_ranking_translation_requires_all_original_ranks_and_preserves_details(self):
         ranking = Ranking(
             "测试榜单",
@@ -64,6 +72,16 @@ class RankingTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             parse_translated_ranking_items([{"rank": 1, "title": "作品一"}], ranking)
+        with self.assertRaises(ValueError):
+            parse_translated_ranking_items(
+                [{"rank": True, "title": "作品一"}, {"rank": 2, "title": "作品二"}],
+                ranking,
+            )
+        with self.assertRaises(ValueError):
+            parse_translated_ranking_items(
+                [{"rank": 1, "title": 1}, {"rank": 2, "title": "作品二"}],
+                ranking,
+            )
 
 
 if __name__ == "__main__":

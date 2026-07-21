@@ -88,6 +88,7 @@ def _placeholder(category: str, featured: bool) -> str:
 
 
 def _story_card(
+    template: str,
     index: int,
     item: EditedItem,
     article: Article,
@@ -108,7 +109,7 @@ def _story_card(
         else ""
     )
     return _render(
-        _template("story_card.html"),
+        template,
         CARD_KIND=("feature" if featured else "standard") + (" with-cover" if cover else " without-cover"),
         ACCENT=str((index - 1) % 4 + 1),
         INDEX=f"{index:02d}",
@@ -155,6 +156,7 @@ def build_daily_image_html(
     """
 
     article_by_id = {article.id: article for article in articles}
+    story_card_template = _template("story_card.html")
     selected = [
         (offset + 1, item, article_by_id[item.article_id])
         for offset, item in enumerate(edition.items)
@@ -164,6 +166,7 @@ def build_daily_image_html(
     if selected:
         first_index, first_item, first_article = selected[0]
         feature = _story_card(
+            story_card_template,
             first_index,
             first_item,
             first_article,
@@ -171,7 +174,7 @@ def build_daily_image_html(
             featured=True,
         )
         stories = "".join(
-            _story_card(index, item, article, cover_images, featured=False)
+            _story_card(story_card_template, index, item, article, cover_images, featured=False)
             for index, item, article in selected[1:]
         )
     else:

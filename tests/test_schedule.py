@@ -5,8 +5,9 @@ from acg_daily.schedule import (
     DailyPublishTime,
     parse_daily_publish_settings,
     parse_daily_publish_time,
+    parse_publish_group_target,
     parse_publish_group_whitelist,
-    parse_publish_timezone,
+    resolve_publish_group_target,
 )
 
 
@@ -47,7 +48,6 @@ class DailyPublishScheduleTests(unittest.TestCase):
             "aiocqhttp:GroupMessage:123456789",
             ["group-123456789"],
             ["aiocqhttp:FriendMessage:123"],
-            ["satori:GroupMessage:123"],
             ["aiocqhttp:GroupMessage:"],
             ["aiocqhttp:GroupMessage:group123"],
             [" aiocqhttp:GroupMessage:123"],
@@ -55,7 +55,37 @@ class DailyPublishScheduleTests(unittest.TestCase):
             with self.subTest(whitelist=whitelist), self.assertRaises(ValueError):
                 parse_publish_group_whitelist(whitelist)
 
-    def test_enabled_schedule_requires_all_settings_and_accepts_timezone(self):
+    def test_publish_target_resolves_legacy_adapter_type_to_one_active_platform_id(self):
+        self.assertEqual(
+            resolve_publish_group_target(
+                "aiocqhttp:GroupMessage:123456789",
+                [("qqbot-main", "aiocqhttp")],
+            ),
+            "qqbot-main:GroupMessage:123456789",
+        )
+        self.assertEqual(
+            resolve_publish_group_target(
+                parse_publish_group_target("qqbot-main:GroupMessage:123456789"),
+                [("qqbot-main", "aiocqhttp")],
+            ),
+            "qqbot-main:GroupMessage:123456789",
+        )
+
+    def test_publish_target_rejects_missing_or_ambiguous_platforms_before_rendering(self):
+        with self.assertRaisesRegex(ValueError, "未找到"):
+            resolve_publish_group_target("aiocqhttp:GroupMessage:123456789", [])
+        with self.assertRaisesRegex(ValueError, "多个"):
+            resolve_publish_group_target(
+                "aiocqhttp:GroupMessage:123456789",
+                [("qqbot-one", "aiocqhttp"), ("qqbot-two", "aiocqhttp")],
+            )
+        with self.assertRaisesRegex(ValueError, "未找到"):
+            resolve_publish_group_target(
+                "other-platform:GroupMessage:123456789",
+                [("other-platform", "satori")],
+            )
+
+    def test_enabled_schedule_requires_all_settings_and_uses_server_local_timezone(self):
         self.assertIsNone(parse_daily_publish_settings({"enable_daily_publish": False}))
         with self.assertRaisesRegex(ValueError, "每日发布时间"):
             parse_daily_publish_settings({"enable_daily_publish": True})
@@ -70,7 +100,6 @@ class DailyPublishScheduleTests(unittest.TestCase):
                     "123456789",
                     "aiocqhttp:GroupMessage:987654321",
                 ],
-                "daily_publish_timezone": "Asia/Shanghai",
             }
         )
 
@@ -79,9 +108,7 @@ class DailyPublishScheduleTests(unittest.TestCase):
             settings.targets,
             ("aiocqhttp:GroupMessage:123456789", "aiocqhttp:GroupMessage:987654321"),
         )
-        self.assertEqual(settings.timezone.key, "Asia/Shanghai")
-        with self.assertRaisesRegex(ValueError, "时区无效"):
-            parse_publish_timezone("Moon/Base")
+        self.assertIsNotNone(settings.now().tzinfo)
 
 
 if __name__ == "__main__":

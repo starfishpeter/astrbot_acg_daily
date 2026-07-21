@@ -72,14 +72,18 @@ def _anime_trending_ranking(body: bytes) -> list[RankingEntry]:
         choices = json.loads(data_node.string)["props"]["pageProps"]["charts"][0]["choices"]
     except (IndexError, KeyError, TypeError, json.JSONDecodeError):
         return []
+    if not isinstance(choices, list):
+        return []
 
     entries: list[RankingEntry] = []
     seen_positions: set[int] = set()
     for choice in choices:
+        if not isinstance(choice, dict):
+            continue
         position = choice.get("position")
         name = choice.get("name")
         if (
-            not isinstance(position, int)
+            type(position) is not int
             or not isinstance(name, str)
             or not name
             or position in seen_positions
@@ -132,8 +136,9 @@ def parse_translated_ranking_items(raw_items: object, ranking: Ranking) -> Ranki
         if not isinstance(item, dict):
             continue
         rank = item.get("rank")
-        title = clean_text(item.get("title"), 120)
-        if not isinstance(rank, int) or rank not in expected_ranks or rank in translated_titles or not title:
+        raw_title = item.get("title")
+        title = clean_text(raw_title, 120) if isinstance(raw_title, str) else ""
+        if type(rank) is not int or rank not in expected_ranks or rank in translated_titles or not title:
             raise ValueError("排行榜翻译包含无效名次或标题")
         translated_titles[rank] = title
     if set(translated_titles) != expected_ranks:

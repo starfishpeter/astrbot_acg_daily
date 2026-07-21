@@ -12,12 +12,13 @@ from astrbot.api.event import MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.tool import FunctionTool, ToolSet
+from astrbot.core.astr_agent_context import AgentContextWrapper, AstrAgentContext
 
 from .acg_daily.editor import (
+    SYSTEM_PROMPT,
     build_editor_prompt,
     build_editor_retry_prompt,
     configured_editor_provider,
-    configured_system_prompt,
     editor_response_diagnosis,
     parse_edition,
     parse_edition_with_ranking,
@@ -25,20 +26,19 @@ from .acg_daily.editor import (
 from .acg_daily.image_report import build_daily_image_html, normalize_cover_data_uri
 from .acg_daily.models import Article, DailyEdition
 from .acg_daily.ranking import Ranking, fetch_ranking
-from .acg_daily.schedule import DailyPublishSettings, parse_daily_publish_settings
-from .acg_daily.scraper import NewsScraper, SourceResult, deduplicate_articles, is_http_url
+from .acg_daily.schedule import DailyPublishSettings, parse_daily_publish_settings, resolve_publish_group_target
+from .acg_daily.scraper import (
+    NewsScraper,
+    SourceResult,
+    collect_tavily_extract_sources,
+    deduplicate_articles,
+    is_http_url,
+)
 from .acg_daily.title_lookup import (
-    MAX_BAIDU_LOOKUP_QUERY_CHARS,
-    MAX_LOOKUP_GROUPS,
-    compact_lookup_result,
     format_bangumi_candidates,
     lookup_bangumi_titles,
     lookup_references_for_text,
-    lookup_search_arguments,
-    lookup_title_groups,
     normalized_lookup_titles,
-    run_lookup_groups,
-    unresolved_bangumi_titles,
 )
 
 
@@ -104,16 +104,15 @@ class DailyEditorHooks(BaseAgentRunHooks):
 
 
 class BatchTitleLookupTool(FunctionTool):
-    """Prefer Bangumi candidates and use web search only for unresolved titles."""
+    """Return Bangumi title candidates for one bounded editor tool call."""
 
-    def __init__(self, search_tool: FunctionTool | None, bangumi_access_token: str, timeout_seconds: int) -> None:
+    def __init__(self, bangumi_access_token: str, timeout_seconds: int) -> None:
         super().__init__(
             name="batch_title_lookup",
             description=(
                 "一次性核对多个动画、漫画、轻小说、游戏作品的中国大陆常用中文译名。"
                 "仅在确实不确定译名时调用一次；titles 中列出全部需要核对的外文作品名。"
-                "工具优先返回 Bangumi 的多个中文词条候选，由你结合新闻上下文判断；"
-                "仅无中文候选的标题才可能使用网页搜索兜底。"
+                "工具返回 Bangumi 的多个中文词条候选，由你结合新闻上下文判断。"
             ),
             parameters={
                 "type": "object",
@@ -127,14 +126,11 @@ class BatchTitleLookupTool(FunctionTool):
                 "required": ["titles"],
             },
         )
-        self._search_tool = search_tool
         self._bangumi_access_token = bangumi_access_token
         self._timeout_seconds = timeout_seconds
         self._called = False
         self.last_result = ""
         self.bangumi_matches: dict = {}
-        self.web_fallback_titles: list[str] = []
-        self.active = search_tool.active if search_tool is not None else True
 
     def _finish(self, result: str) -> str:
         self.last_result = result
@@ -143,13 +139,9 @@ class BatchTitleLookupTool(FunctionTool):
     async def call(self, context, **kwargs):
         if self._called:
             logger.warning("ACG 日报：已阻止重复的批量译名核对，请基于已有结果完成编辑。")
-            return self._finish("本次日报已经完成一次批量译名核对，不能再次搜索。请基于候选资讯和已有搜索结果完成编辑。")
+            return self._finish("本次日报已经完成一次批量译名核对，不能再次调用工具。请基于候选资讯和已有核对结果完成编辑。")
         self._called = True
-        baidu_search = self._search_tool is not None and self._search_tool.name == "web_search_baidu"
-        titles = normalized_lookup_titles(
-            kwargs.get("titles"),
-            MAX_BAIDU_LOOKUP_QUERY_CHARS if baidu_search else 120,
-        )
+        titles = normalized_lookup_titles(kwargs.get("titles"))
         if not titles:
             return self._finish("没有收到可核对的作品名。请直接完成日报编辑。")
 
@@ -160,62 +152,14 @@ class BatchTitleLookupTool(FunctionTool):
             logger.info("ACG 日报：Bangumi 已返回 %d/%d 个作品名的中文词条候选。", matched_count, len(titles))
         self.bangumi_matches = bangumi_matches
 
-        unresolved_titles = unresolved_bangumi_titles(titles, bangumi_matches)
-        self.web_fallback_titles = unresolved_titles
         bangumi_result = format_bangumi_candidates(bangumi_matches)
-        if not unresolved_titles:
-            return self._finish(bangumi_result or "Bangumi 未返回可用中文词条候选。请使用已有知识完成翻译。")
-        if self._search_tool is None:
-            if bangumi_result:
-                return self._finish(bangumi_result + "\n\n以下作品未获得 Bangumi 中文候选，请使用已有知识完成翻译：" + "；".join(unresolved_titles))
-            return self._finish("Bangumi 未返回可用中文词条候选，且网页搜索未启用。请使用已有知识完成翻译。")
-
-        groups = lookup_title_groups(
-            unresolved_titles,
-            MAX_BAIDU_LOOKUP_QUERY_CHARS if baidu_search else 420,
-        )
-        logger.info(
-            "ACG 日报：Bangumi 未覆盖 %d 个作品名，将以 %d 个并发网页搜索组兜底。",
-            len(unresolved_titles),
-            len(groups),
-        )
-        searched_title_count = sum(len(group) for group in groups)
-        if searched_title_count < len(unresolved_titles):
-            logger.warning(
-                "ACG 日报：批量译名核对最多允许 %d 个搜索组，将跳过 %d 个较低优先级标题。",
-                MAX_LOOKUP_GROUPS,
-                len(unresolved_titles) - searched_title_count,
-            )
-        async def search_group(group: list[str]) -> object:
-            return await self._search_tool.call(
-                context,
-                **lookup_search_arguments(group, self._search_tool.name, self._search_tool.parameters),
-            )
-
-        results = await run_lookup_groups(groups, search_group)
-        for result in results:
-            if isinstance(result, BaseException):
-                logger.warning("ACG 日报：批量译名核对的一个搜索组失败：%s", result)
-        compacted = [compact_lookup_result(result) for result in results]
-        usable = [result for result in compacted if result]
-        logger.info(
-            "ACG 日报：批量译名核对完成，%d/%d 个搜索组返回可用结果。",
-            len(usable),
-            len(groups),
-        )
-        if not usable:
-            return self._finish((bangumi_result + "\n\n" if bangumi_result else "") + "网页搜索未获得可用结果。请使用已有知识完成翻译，不要再次搜索。")
-        web_result = "网页搜索兜底结果（仅用于未获 Bangumi 中文候选的作品名翻译，请勿据此补充新闻事实）：\n" + "\n\n".join(usable)
-        return self._finish((bangumi_result + "\n\n" if bangumi_result else "") + web_result)
+        if bangumi_result:
+            return self._finish(bangumi_result)
+        return self._finish("Bangumi 未返回可用中文词条候选。请使用已有知识和候选资讯上下文完成翻译。")
 
     def references_for(self, original_title: str):
-        provider = self._search_tool.name if self._search_tool is not None else "网页搜索"
-        return lookup_references_for_text(
-            original_title,
-            self.bangumi_matches,
-            self.web_fallback_titles,
-            provider,
-        )
+        return lookup_references_for_text(original_title, self.bangumi_matches)
+
 
 class AcgDailyPlugin(Star):
     """Use /acg日报 to create an AI-edited ACG image digest."""
@@ -252,14 +196,16 @@ class AcgDailyPlugin(Star):
         if not self._can_send_result("命令执行"):
             return
         urls = self._source_urls()
+        tavily_urls = self._tavily_extract_source_urls()
         logger.info(
-            "ACG 日报：收到来自 %s 的命令，当前配置了 %d 个资讯源。",
+            "ACG 日报：收到来自 %s 的命令，当前配置了 %d 个普通资讯源和 %d 个 Tavily 提取源。",
             event.unified_msg_origin,
             len(urls),
+            len(tavily_urls),
         )
-        if not urls:
+        if not urls and not tavily_urls:
             logger.warning("ACG 日报：没有配置有效的资讯源链接。")
-            yield event.plain_result("请先在插件配置的「资讯源链接」列表中至少添加一个 http(s) URL。")
+            yield event.plain_result("请先在「资讯源链接」或「Tavily 提取资讯源」中至少添加一个 http(s) URL。")
             return
 
         session_key = event.unified_msg_origin
@@ -275,7 +221,7 @@ class AcgDailyPlugin(Star):
                 return
 
             try:
-                images = await self._create_daily_images(event, urls)
+                images = await self._create_daily_images(event, urls, tavily_urls)
             except Exception as exc:
                 logger.exception("ACG 日报：生成失败。")
                 yield event.plain_result(f"生成 ACG 日报失败：{exc}")
@@ -341,8 +287,7 @@ class AcgDailyPlugin(Star):
     def _scheduler_status(settings: DailyPublishSettings | None) -> tuple[str, ...]:
         if settings is None:
             return ("disabled",)
-        timezone = getattr(settings.timezone, "key", "服务器本地时区")
-        return ("enabled", settings.time.text, *settings.targets, timezone)
+        return ("enabled", settings.time.text, *settings.targets)
 
     def _log_scheduler_status(self, settings: DailyPublishSettings | None) -> None:
         if settings is None:
@@ -350,11 +295,9 @@ class AcgDailyPlugin(Star):
             return
         now = settings.now()
         next_run = settings.time.next_run_after(now)
-        timezone = getattr(settings.timezone, "key", "服务器本地时区")
         logger.info(
-            "ACG 日报：定时发布已启用，每日 %s（%s）发送至 %d 个白名单群聊；下次触发：%s。",
+            "ACG 日报：定时发布已启用，每日 %s（AstrBot 服务器本地时区）发送至 %d 个白名单群聊；下次触发：%s。",
             settings.time.text,
-            timezone,
             len(settings.targets),
             next_run.strftime("%Y-%m-%d %H:%M %Z"),
         )
@@ -365,19 +308,34 @@ class AcgDailyPlugin(Star):
         targets: tuple[str, ...],
     ) -> None:
         urls = self._source_urls()
+        tavily_urls = self._tavily_extract_source_urls()
         logger.info(
-            "ACG 日报：定时发布触发，将发送至 %d 个白名单群聊，当前配置 %d 个资讯源。",
+            "ACG 日报：定时发布触发，将发送至 %d 个白名单群聊，当前配置 %d 个普通资讯源和 %d 个 Tavily 提取源。",
             len(targets),
             len(urls),
+            len(tavily_urls),
         )
-        if not urls:
+        if not urls and not tavily_urls:
             logger.warning("ACG 日报：定时发布已跳过，未配置有效资讯源。")
             return
 
         for target in targets:
-            await self._publish_scheduled_daily_to_group(target, urls)
+            await self._publish_scheduled_daily_to_group(target, urls, tavily_urls)
 
-    async def _publish_scheduled_daily_to_group(self, target: str, urls: list[str]) -> None:
+    async def _publish_scheduled_daily_to_group(
+        self,
+        target: str,
+        urls: list[str],
+        tavily_urls: list[str],
+    ) -> None:
+        try:
+            resolved_target = self._resolve_scheduled_publish_target(target)
+        except ValueError as exc:
+            logger.error("ACG 日报：定时发布未开始，目标 %s 无法匹配运行中的 QQ 平台：%s", target, exc)
+            return
+        if resolved_target != target:
+            logger.info("ACG 日报：定时发布目标已从 %s 解析为运行中平台会话 %s。", target, resolved_target)
+        target = resolved_target
         lock = self._session_locks.setdefault(target, asyncio.Lock())
         if lock.locked():
             logger.warning("ACG 日报：定时发布已跳过，白名单群聊 %s 正在生成另一份日报。", target)
@@ -386,7 +344,7 @@ class AcgDailyPlugin(Star):
         async with lock:
             started_at = time.monotonic()
             try:
-                images = await self._create_daily_images_for_session(target, urls)
+                images = await self._create_daily_images_for_session(target, urls, tavily_urls)
                 if not self._can_send_result("定时日报"):
                     return
                 logger.info(
@@ -414,12 +372,32 @@ class AcgDailyPlugin(Star):
             except Exception:
                 logger.exception("ACG 日报：定时发布失败，白名单群聊 %s。", target)
 
-    async def _create_daily_images_for_session(self, session_key: str, urls: list[str]) -> list[str]:
+    def _resolve_scheduled_publish_target(self, target: str) -> str:
+        return resolve_publish_group_target(
+            target,
+            (
+                (platform.meta().id, platform.meta().name)
+                for platform in self.context.platform_manager.platform_insts
+            ),
+        )
+
+    async def _create_daily_images_for_session(
+        self,
+        session_key: str,
+        urls: list[str],
+        tavily_urls: list[str],
+    ) -> list[str]:
         event = _ScheduledDailyEvent(session_key)
-        return await self._create_daily_images(event, urls)
+        return await self._create_daily_images(event, urls, tavily_urls)
 
     def _source_urls(self) -> list[str]:
-        configured = self.config.get("news_source_urls", [])
+        return self._configured_urls("news_source_urls")
+
+    def _tavily_extract_source_urls(self) -> list[str]:
+        return self._configured_urls("tavily_extract_source_urls")
+
+    def _configured_urls(self, setting_name: str) -> list[str]:
+        configured = self.config.get(setting_name, [])
         if not isinstance(configured, list):
             return []
         urls: list[str] = []
@@ -491,12 +469,14 @@ class AcgDailyPlugin(Star):
         self,
         event: AstrMessageEvent,
         urls: list[str],
+        tavily_urls: list[str],
     ) -> list[str]:
         scraper = NewsScraper(
             timeout_seconds=int(self.config.get("request_timeout_seconds", 10)),
             max_articles_per_source=int(self.config.get("max_articles_per_source", 10)),
         )
         results = await scraper.collect(urls)
+        results.extend(await self._collect_tavily_extract_sources(event, tavily_urls))
         articles = deduplicate_articles(
             [article for result in results for article in result.articles],
             max_candidates=max(1, min(int(self.config.get("max_candidates", 40)), 80)),
@@ -547,7 +527,7 @@ class AcgDailyPlugin(Star):
             else:
                 provider_id = await self.context.get_current_chat_provider_id(event.unified_msg_origin)
                 logger.info("ACG 日报：使用当前会话的编辑模型 %s。", provider_id)
-            system_prompt = configured_system_prompt(self.config.get("editor_system_prompt"))
+            system_prompt = SYSTEM_PROMPT
             prompt = build_editor_prompt(articles, max_items, ranking)
             title_lookup_tool = self._title_lookup_tool(event)
             search_tools = ToolSet([title_lookup_tool]) if title_lookup_tool is not None else None
@@ -587,7 +567,7 @@ class AcgDailyPlugin(Star):
                         prompt=prompt,
                         tools=search_tools,
                         max_steps=3,
-                        # Bangumi may need four bounded request waves plus one web-search fallback.
+                        # Bangumi uses bounded concurrent requests for the one editor tool call.
                         tool_call_timeout=150,
                         agent_hooks=agent_hooks,
                     ),
@@ -710,56 +690,49 @@ class AcgDailyPlugin(Star):
             return "未命中本次查询词，由模型依据已有知识或上下文翻译"
         parts = []
         for reference in references:
-            if reference.channel == "Bangumi":
-                parts.append(f"Bangumi 查询「{reference.query}」候选：{'、'.join(reference.candidates)}")
-            else:
-                parts.append(f"{reference.channel} 网页兜底查询「{reference.query}」")
+            parts.append(f"Bangumi 查询「{reference.query}」候选：{'、'.join(reference.candidates)}")
         return "；".join(parts)
 
-    def _title_lookup_tool(self, event: AstrMessageEvent) -> BatchTitleLookupTool | None:
+    def _title_lookup_tool(self, _event: AstrMessageEvent) -> BatchTitleLookupTool | None:
         configured_token = self.config.get("bangumi_access_token", "")
         bangumi_access_token = configured_token.strip() if isinstance(configured_token, str) else ""
-        search_tool = self._configured_web_search_tool(event) if self.config.get("enable_web_search", False) else None
-        if not bangumi_access_token and search_tool is None:
+        if not bangumi_access_token:
             return None
-        if bangumi_access_token:
-            logger.info("ACG 日报：已为编辑模型启用 Bangumi 中文词条候选核对。")
+        logger.info("ACG 日报：已为编辑模型启用 Bangumi 中文词条候选核对。")
         return BatchTitleLookupTool(
-            search_tool,
             bangumi_access_token,
             int(self.config.get("request_timeout_seconds", 10)),
         )
 
-    def _configured_web_search_tool(self, event: AstrMessageEvent) -> FunctionTool | None:
-        provider_settings = self.context.get_config(event.unified_msg_origin).get(
-            "provider_settings",
-            {},
-        )
-        if not provider_settings.get("web_search", False):
-            logger.warning("ACG 日报：插件已允许联网核对，但 AstrBot 全局网页搜索未启用。")
-            return None
-
-        search_tool_names = {
-            "tavily": "web_search_tavily",
-            "bocha": "web_search_bocha",
-            "brave": "web_search_brave",
-            "firecrawl": "web_search_firecrawl",
-            "baidu_ai_search": "web_search_baidu",
-            "exa": "web_search_exa",
-        }
-        provider_name = str(provider_settings.get("websearch_provider", "tavily"))
-        tool_name = search_tool_names.get(provider_name)
-        if not tool_name:
-            logger.warning("ACG 日报：不支持的全局网页搜索提供商「%s」。", provider_name)
-            return None
-
+    async def _collect_tavily_extract_sources(
+        self,
+        event: AstrMessageEvent,
+        urls: list[str],
+    ) -> list[SourceResult]:
+        if not urls:
+            return []
         try:
-            tool = self.context.get_llm_tool_manager().get_builtin_tool(tool_name)
+            tool = self.context.get_llm_tool_manager().get_builtin_tool("tavily_extract_web_page")
         except (KeyError, TypeError) as exc:
-            logger.warning("ACG 日报：无法加载网页搜索工具「%s」：%s", tool_name, exc)
-            return None
-        logger.info("ACG 日报：网页搜索将仅作为 Bangumi 未覆盖标题的兜底，提供商为「%s」。", tool_name)
-        return tool
+            logger.warning("ACG 日报：无法加载 AstrBot Tavily 页面提取工具：%s", exc)
+            return [SourceResult(url, "Tavily", [], "Tavily 页面提取工具不可用") for url in urls]
+        if not getattr(tool, "active", True):
+            logger.warning("ACG 日报：AstrBot Tavily 页面提取工具当前未启用。")
+            return [SourceResult(url, "Tavily", [], "Tavily 页面提取工具未启用") for url in urls]
+
+        agent_context = AgentContextWrapper(AstrAgentContext(context=self.context, event=event))
+        results = await collect_tavily_extract_sources(
+            urls,
+            tool,
+            agent_context,
+            int(self.config.get("max_articles_per_source", 10)),
+        )
+        for result in results:
+            if result.error:
+                logger.warning("ACG 日报：Tavily 资讯源提取失败（%s）：%s", result.url, result.error)
+            else:
+                logger.info("ACG 日报：Tavily 资讯源提取成功（%s），获得 %d 条资讯。", result.source_name, len(result.articles))
+        return results
 
     async def _prepare_cover_images(self, covers: dict[int, str]) -> dict[int, str]:
         """Adapt downloaded covers for Chromium before putting them in HTML."""

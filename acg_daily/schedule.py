@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 _DAILY_TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -46,7 +46,7 @@ def parse_daily_publish_time(value: object) -> DailyPublishTime | None:
 
 
 def parse_publish_group_target(value: object) -> str:
-    """Normalize a QQ group number or group-only message origin for sending."""
+    """Normalize a QQ group number or a configured platform-ID group session."""
 
     if not isinstance(value, str):
         raise ValueError("定时发布群聊白名单中的目标必须是文本")
@@ -59,10 +59,8 @@ def parse_publish_group_target(value: object) -> str:
         return f"{_AIOCQHTTP_PLATFORM}:{_GROUP_MESSAGE_TYPE}:{target}"
     parts = target.split(":")
     if len(parts) != 3 or not all(parts):
-        raise ValueError("定时发布群聊白名单必须是 QQ 群号或 aiocqhttp:GroupMessage:群号 格式")
-    platform, message_type, session_id = parts
-    if platform != _AIOCQHTTP_PLATFORM:
-        raise ValueError("定时发布群聊白名单只支持 aiocqhttp 平台或直接填写 QQ 群号")
+        raise ValueError("定时发布群聊白名单必须是 QQ 群号或 平台ID:GroupMessage:群号 格式")
+    _platform_id, message_type, session_id = parts
     if message_type != _GROUP_MESSAGE_TYPE:
         raise ValueError("定时发布群聊白名单只允许 GroupMessage 群聊目标")
     if not _QQ_GROUP_NUMBER_PATTERN.fullmatch(session_id):
@@ -70,6 +68,38 @@ def parse_publish_group_target(value: object) -> str:
     if any(part != part.strip() for part in parts):
         raise ValueError("定时发布群聊白名单中的目标不能包含首尾空白字符")
     return target
+
+
+def resolve_publish_group_target(
+    target: str,
+    platforms: Iterable[tuple[str, str]],
+) -> str:
+    """Resolve a legacy adapter-type prefix to one active aiocqhttp platform ID."""
+
+    configured_platform, message_type, group_id = target.split(":", 2)
+    identities = tuple(platforms)
+    exact_matches = [
+        platform_id
+        for platform_id, platform_name in identities
+        if platform_id == configured_platform and platform_name == _AIOCQHTTP_PLATFORM
+    ]
+    if exact_matches:
+        return target
+
+    matching_ids = [
+        platform_id
+        for platform_id, platform_name in identities
+        if platform_name == configured_platform
+    ]
+    if len(matching_ids) == 1:
+        return f"{matching_ids[0]}:{message_type}:{group_id}"
+    if not matching_ids:
+        raise ValueError(f"未找到已加载的 aiocqhttp 平台实例「{configured_platform}」")
+    raise ValueError(
+        "检测到多个 aiocqhttp 平台实例（"
+        + "、".join(matching_ids)
+        + "），请在白名单填写实际平台ID:GroupMessage:群号",
+    )
 
 
 def parse_publish_group_whitelist(value: object) -> tuple[str, ...]:
@@ -85,28 +115,15 @@ def parse_publish_group_whitelist(value: object) -> tuple[str, ...]:
     return tuple(targets)
 
 
-def parse_publish_timezone(value: object) -> ZoneInfo | None:
-    """Return an optional IANA timezone, using the server timezone when blank."""
-
-    name = str(value or "").strip()
-    if not name:
-        return None
-    try:
-        return ZoneInfo(name)
-    except ZoneInfoNotFoundError as exc:
-        raise ValueError(f"定时发布时区无效：{name}") from exc
-
-
 @dataclass(frozen=True)
 class DailyPublishSettings:
     """The complete, valid configuration required for proactive publishing."""
 
     time: DailyPublishTime
     targets: tuple[str, ...]
-    timezone: ZoneInfo | None
 
     def now(self) -> datetime:
-        return datetime.now(self.timezone) if self.timezone else datetime.now().astimezone()
+        return datetime.now().astimezone()
 
 
 def parse_daily_publish_settings(config: dict) -> DailyPublishSettings | None:
@@ -126,5 +143,4 @@ def parse_daily_publish_settings(config: dict) -> DailyPublishSettings | None:
     return DailyPublishSettings(
         time=publish_time,
         targets=targets,
-        timezone=parse_publish_timezone(config.get("daily_publish_timezone")),
     )

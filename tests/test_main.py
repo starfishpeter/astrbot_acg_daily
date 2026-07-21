@@ -4,13 +4,12 @@ from pathlib import Path
 
 
 class MainSourceTests(unittest.TestCase):
-    def test_daily_item_limit_and_batch_search_budget_are_bounded(self):
+    def test_daily_item_limit_and_bangumi_lookup_budget_are_bounded(self):
         source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         constants = [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)]
 
         self.assertIn(12, constants)
-        self.assertIn("MAX_LOOKUP_GROUPS", source)
         self.assertIn("normalized_lookup_titles", source)
         self.assertIn("max_steps=3", source)
         self.assertIn("tool_call_timeout=150", source)
@@ -18,6 +17,8 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("_DEFAULT_EDITOR_SLOW_WARNING_SECONDS = 600", source)
         self.assertIn("_await_editor_response", source)
         self.assertIn("editor_slow_warning_seconds", source)
+        self.assertNotIn("enable_web_search", source)
+        self.assertNotIn("web_search_tavily", source)
 
     def test_scheduled_publish_uses_context_send_message_and_lifecycle_hooks(self):
         source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
@@ -29,11 +30,14 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("async def terminate(self)", source)
         self.assertIn("parse_daily_publish_settings", source)
         self.assertIn("self.context.send_message", source)
+        self.assertIn("_resolve_scheduled_publish_target", source)
+        self.assertIn("定时发布未开始", source)
         self.assertIn("_publish_scheduled_daily_to_group", source)
         self.assertIn("message.url_image(image)", source)
         self.assertIn("定时发布", source)
         self.assertIn("daily_publish_group_whitelist", schedule_source)
         self.assertIn("GroupMessage", schedule_source)
+        self.assertNotIn("daily_publish_timezone", schedule_source)
 
     def test_daily_report_renders_and_sends_one_long_image(self):
         source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
@@ -87,6 +91,22 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("必要时仅进行一次批量译名核对", source)
         self.assertIn("编辑模型已中文化", source)
         self.assertIn("只可调用一次“批量译名核对”工具", editor_source)
+
+    def test_tavily_extract_sources_are_distinct_from_standard_rss_and_html_sources(self):
+        source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
+        scraper_source = (Path(__file__).parent.parent / "acg_daily" / "scraper.py").read_text(encoding="utf-8")
+        schema = (Path(__file__).parent.parent / "_conf_schema.json").read_text(encoding="utf-8")
+
+        self.assertIn("tavily_extract_source_urls", source)
+        self.assertIn("tavily_extract_web_page", source)
+        self.assertIn("AgentContextWrapper", source)
+        self.assertIn("collect_tavily_extract_sources", source)
+        self.assertIn("validate_source_url(url)", scraper_source)
+        self.assertIn("tavily_extract_entries", scraper_source)
+        self.assertIn('"tavily_extract_source_urls"', schema)
+        self.assertNotIn('"editor_system_prompt"', schema)
+        self.assertNotIn('"daily_publish_timezone"', schema)
+        self.assertNotIn('"enable_web_search"', schema)
 
 
 if __name__ == "__main__":

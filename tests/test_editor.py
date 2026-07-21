@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -8,7 +9,6 @@ from acg_daily.editor import (
     build_editor_retry_prompt,
     build_editor_prompt,
     configured_editor_provider,
-    configured_system_prompt,
     parse_edition,
     parse_edition_with_ranking,
 )
@@ -58,6 +58,8 @@ class EditorTests(unittest.TestCase):
         self.assertIn("无论是否调用过工具", SYSTEM_PROMPT)
         self.assertIn("items 是始终必填的数组", SYSTEM_PROMPT)
         self.assertIn('"items":[]', SYSTEM_PROMPT)
+        self.assertIn("article_id、category、title、summary 必须存在且分别为整数、字符串、字符串、字符串", SYSTEM_PROMPT)
+        self.assertIn("每项的 rank、title 必须分别为整数、字符串", SYSTEM_PROMPT)
 
     def test_prompt_bounds_candidate_summaries_and_omits_unused_metadata(self):
         article = Article(1, "Title", "x" * 500, "https://example.com", "Example News", "2026-07-21")
@@ -68,12 +70,7 @@ class EditorTests(unittest.TestCase):
         self.assertNotIn("Example News", prompt)
         self.assertNotIn("2026-07-21", prompt)
 
-    def test_configured_system_prompt_uses_nonempty_override(self):
-        self.assertEqual(configured_system_prompt("  Custom policy  "), "Custom policy")
-        self.assertEqual(configured_system_prompt("\n\t"), SYSTEM_PROMPT)
-        self.assertEqual(configured_system_prompt(None), SYSTEM_PROMPT)
-
-    def test_retry_prompt_keeps_completed_title_lookups_and_requires_items(self):
+    def test_retry_prompt_keeps_completed_title_lookups_and_requires_json_contract(self):
         prompt = build_editor_retry_prompt("候选资讯", "Bangumi 词条候选\n- 原名 -> 中文名")
 
         self.assertIn("候选资讯", prompt)
@@ -81,6 +78,15 @@ class EditorTests(unittest.TestCase):
         self.assertIn("包含 items", prompt)
         self.assertIn("不要再次调用工具", prompt)
         self.assertIn("完整 ranking_items 数组", prompt)
+        self.assertIn("article_id、category、title、summary 必须分别为整数、字符串、字符串、字符串", prompt)
+        self.assertIn("rank、title 必须分别为整数、字符串", prompt)
+
+    def test_retry_prompt_repeats_json_contract_without_a_lookup_result(self):
+        prompt = build_editor_retry_prompt("候选资讯", "")
+
+        self.assertIn("候选资讯", prompt)
+        self.assertIn("上一轮未返回合规日报 JSON", prompt)
+        self.assertIn("必须包含 items 数组", prompt)
 
     def test_response_diagnosis_includes_full_completion_and_json_shape(self):
         completion = '{"intro":"only intro","ranking_items":[]}'
@@ -97,12 +103,24 @@ class EditorTests(unittest.TestCase):
         self.assertIsNone(configured_editor_provider("\n\t"))
         self.assertIsNone(configured_editor_provider(None))
 
-    def test_schema_default_matches_editor_prompt(self):
+    def test_schema_does_not_expose_an_editor_system_prompt_override(self):
         schema_path = Path(__file__).parent.parent / "_conf_schema.json"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(schema["editor_system_prompt"]["type"], "text")
-        self.assertEqual(schema["editor_system_prompt"]["default"], SYSTEM_PROMPT)
+        self.assertNotIn("editor_system_prompt", schema)
+
+    def test_prompt_json_example_is_valid_for_the_current_parser(self):
+        match = re.search(r"JSON 输出格式：\n(\{.+\})\n\nitems 是", SYSTEM_PROMPT)
+
+        self.assertIsNotNone(match)
+        response = match.group(1)
+        json.loads(response)
+        ranking = Ranking("测试榜单", "测试来源", (RankingEntry(1, "Original"),))
+        edition, translated, error = parse_edition_with_ranking(response, self.articles, 5, ranking)
+
+        self.assertEqual(edition.items[0].article_id, 1)
+        self.assertEqual(translated.entries[0].rank, 1)
+        self.assertEqual(error, "")
 
     def test_parse_edition_rejects_unknown_and_duplicate_ids(self):
         response = """```json
@@ -128,6 +146,22 @@ class EditorTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             parse_edition(response, self.articles, 5)
+
+    def test_parse_edition_does_not_treat_json_true_as_article_id_one(self):
+        response = '{"intro":"test","items":[{"article_id":true,"category":"动画","title":"标题","summary":"摘要"}]}'
+
+        with self.assertRaises(ValueError):
+            parse_edition(response, self.articles, 5)
+
+    def test_parse_edition_rejects_non_string_intro_and_required_item_fields(self):
+        responses = (
+            '{"intro":{},"items":[{"article_id":1,"category":"动画","title":"标题","summary":"摘要"}]}',
+            '{"items":[{"article_id":1,"category":{},"title":[],"summary":1}]}',
+        )
+
+        for response in responses:
+            with self.subTest(response=response), self.assertRaises(ValueError):
+                parse_edition(response, self.articles, 5)
 
     def test_editor_response_translates_ranking_with_the_news_in_one_json_object(self):
         ranking = Ranking(

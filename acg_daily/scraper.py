@@ -22,6 +22,7 @@ from bs4 import BeautifulSoup
 from .models import Article
 
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_TAVILY_EXTRACT_CHARS = 15_000
 # Covers are decoded and recompressed before rendering. Allow a reasonable
 # source-file size here so common 1200px+ publisher artwork is not discarded.
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
@@ -116,17 +117,7 @@ def normalized_title(title: str) -> str:
 
 
 def _is_public_ip(value: str) -> bool:
-    address = ipaddress.ip_address(value)
-    return not any(
-        (
-            address.is_private,
-            address.is_loopback,
-            address.is_link_local,
-            address.is_multicast,
-            address.is_reserved,
-            address.is_unspecified,
-        ),
-    )
+    return ipaddress.ip_address(value).is_global
 
 
 async def validate_source_url(url: str) -> None:
@@ -513,6 +504,75 @@ def _html_entries(body: bytes, source_url: str, limit: int) -> tuple[str, list[A
         if len(articles) >= limit:
             break
     return source_name, articles
+
+
+def tavily_extract_entries(content: object, source_url: str, limit: int) -> tuple[str, list[Article]]:
+    """Turn one Tavily Extract response into a bounded untrusted news candidate."""
+
+    if not isinstance(content, str):
+        return "", []
+    raw_content = content.strip()[:MAX_TAVILY_EXTRACT_CHARS]
+    if raw_content.startswith("URL:"):
+        _url_line, separator, raw_content = raw_content.partition("\nContent:")
+        if not separator:
+            return "", []
+    raw_content = raw_content.strip()
+    if not raw_content or raw_content.startswith("Error:"):
+        return "", []
+
+    source_name = f"Tavily · {urlsplit(source_url).hostname or source_url}"
+    # Tavily returns Markdown-like raw content. Preserve link labels but discard
+    # syntax so a page heading can become the candidate title.
+    plain_content = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", raw_content)
+    headings = re.findall(r"(?m)^\s*#{1,6}\s+(.+?)\s*$", plain_content)
+    title = clean_text(headings[0], 200) if headings else ""
+    plain_content = re.sub(r"(?m)^\s*#{1,6}\s+", "", plain_content)
+    text = clean_text(plain_content, 2000)
+    if not title:
+        title = clean_text(text.split(". ", 1)[0], 200)
+    if not title:
+        return source_name, []
+    summary = text
+    if summary.startswith(title):
+        summary = summary[len(title) :].lstrip(" .:-")
+    if not summary:
+        summary = title
+    return (
+        source_name,
+        [
+            Article(
+                id=0,
+                title=title,
+                summary=summary[:700],
+                url=canonical_url(source_url),
+                source=source_name,
+            ),
+        ][: max(0, limit)],
+    )
+
+
+async def collect_tavily_extract_sources(
+    urls: list[str],
+    tool: object,
+    tool_context: object,
+    max_articles_per_source: int,
+) -> list[SourceResult]:
+    """Use AstrBot's Tavily Extract tool for one independently configured URL each."""
+
+    limit = max(1, min(max_articles_per_source, 20))
+
+    async def extract_one(url: str) -> SourceResult:
+        try:
+            await validate_source_url(url)
+            result = await tool.call(tool_context, url=url, extract_depth="basic")
+            source_name, articles = tavily_extract_entries(result, url, limit)
+            if not articles:
+                return SourceResult(url, source_name or "Tavily", [], "未从 Tavily 提取结果中识别到资讯内容")
+            return SourceResult(url, source_name, articles)
+        except Exception as exc:
+            return SourceResult(url, "Tavily", [], str(exc) or type(exc).__name__)
+
+    return await asyncio.gather(*(extract_one(url) for url in urls))
 
 
 def _date_sort_value(value: str) -> float:
