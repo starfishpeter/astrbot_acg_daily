@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from acg_daily.models import Article
 from acg_daily.scraper import (
@@ -137,14 +137,14 @@ class ScraperTests(unittest.TestCase):
         self.assertEqual(len(articles), 1)
         self.assertEqual(articles[0].cover_url, "https://images.example/cover.jpg")
 
-    def test_article_page_cover_prefers_open_graph_image(self):
+    def test_article_page_cover_prefers_an_article_body_image_over_open_graph_metadata(self):
         page = b"""<!doctype html><html><head>
         <meta property="og:image" content="/images/hero.jpg">
         </head><body><article><img src="/images/body.jpg"></article></body></html>"""
 
         cover_url = _article_page_cover_url(page, "https://example.com/news/item")
 
-        self.assertEqual(cover_url, "https://example.com/images/hero.jpg")
+        self.assertEqual(cover_url, "https://example.com/images/body.jpg")
 
     def test_article_page_cover_reads_post_entry_lazy_image(self):
         page = b"""<!doctype html><html><body>
@@ -195,6 +195,78 @@ class ScraperTests(unittest.TestCase):
                     cover_url,
                     f"https://p2.bahamut.com.tw/B/2KU/01/{image_name}",
                 )
+
+    def test_source_entry_cover_is_used_before_an_article_page_cover(self):
+        article = Article(
+            1,
+            "Anime announcement",
+            "",
+            "https://example.com/news/item",
+            "Example News",
+            cover_url="https://images.example/entry-cover.jpg",
+        )
+        scraper = NewsScraper(timeout_seconds=10, max_articles_per_source=10)
+        session = object()
+
+        with (
+            patch("acg_daily.scraper._read_source_response", new=AsyncMock()) as read_response,
+            patch.object(
+                scraper,
+                "_fetch_cover_image",
+                new=AsyncMock(return_value="data:image/jpeg;base64,dGVzdA=="),
+            ) as fetch_cover,
+        ):
+            cover, is_detail_cover = asyncio.run(scraper._fetch_article_cover_image(session, article))
+
+        read_response.assert_not_awaited()
+        fetch_cover.assert_awaited_once_with(session, "https://images.example/entry-cover.jpg")
+        self.assertEqual(cover, "data:image/jpeg;base64,dGVzdA==")
+        self.assertFalse(is_detail_cover)
+
+    def test_article_page_cover_is_used_when_the_source_entry_cover_cannot_be_downloaded(self):
+        article = Article(
+            1,
+            "Anime announcement",
+            "",
+            "https://example.com/news/item",
+            "Example News",
+            cover_url="https://images.example/entry-cover.jpg",
+        )
+        page = b'<meta property="og:image" content="https://images.example/article-cover.jpg">'
+        scraper = NewsScraper(timeout_seconds=10, max_articles_per_source=10)
+        session = object()
+
+        with (
+            patch(
+                "acg_daily.scraper._read_source_response",
+                new=AsyncMock(return_value=(article.url, page, "text/html")),
+            ) as read_response,
+            patch.object(
+                scraper,
+                "_fetch_cover_image",
+                new=AsyncMock(
+                    side_effect=[
+                        ValueError("cover HTTP 404"),
+                        ValueError("cover HTTP 404"),
+                        "data:image/jpeg;base64,dGVzdA==",
+                    ],
+                ),
+            ) as fetch_cover,
+            patch("acg_daily.scraper.asyncio.sleep", new=AsyncMock()),
+        ):
+            cover, is_detail_cover = asyncio.run(scraper._fetch_article_cover_image(session, article))
+
+        read_response.assert_awaited_once_with(session, article.url)
+        self.assertEqual(
+            fetch_cover.await_args_list,
+            [
+                call(session, "https://images.example/entry-cover.jpg"),
+                call(session, "https://images.example/entry-cover.jpg"),
+                call(session, "https://images.example/article-cover.jpg"),
+            ],
+        )
+        self.assertEqual(cover, "data:image/jpeg;base64,dGVzdA==")
+        self.assertTrue(is_detail_cover)
 
     def test_article_page_cover_returns_empty_for_ann_page_without_images(self):
         page = b"""<!doctype html><html><body><main><article>

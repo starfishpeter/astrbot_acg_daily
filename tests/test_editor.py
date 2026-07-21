@@ -83,7 +83,7 @@ class EditorTests(unittest.TestCase):
 
         self.assertIn("服务器本地日期是 2026-07-21", prompt)
         self.assertIn("优先选择当天发布的内容", prompt)
-        self.assertIn("items 必须先列当天内容", prompt)
+        self.assertIn("items 必须按发布时间从新到旧排列", prompt)
 
     def test_retry_prompt_keeps_completed_title_lookups_and_requires_json_contract(self):
         prompt = build_editor_retry_prompt("候选资讯", "Bangumi 词条候选\n- 原名 -> 中文名")
@@ -178,18 +178,20 @@ class EditorTests(unittest.TestCase):
             with self.subTest(response=response), self.assertRaises(ValueError):
                 parse_edition(response, self.articles, 5)
 
-    def test_current_day_items_are_moved_ahead_of_older_items_without_reordering_each_group(self):
+    def test_selected_items_are_ordered_by_local_publication_date_with_unknown_dates_last(self):
         local_now = datetime(2026, 7, 21, 10, tzinfo=timezone(timedelta(hours=8)))
         articles = [
-            Article(1, "Yesterday", "", "https://example.com/one", "Example", "2026-07-20"),
+            Article(1, "Week old", "", "https://example.com/one", "Example", "2026-07-14"),
             Article(2, "Today first", "", "https://example.com/two", "Example", "2026-07-21T01:00:00Z"),
             Article(3, "Today second", "", "https://example.com/three", "Example", "Mon, 20 Jul 2026 21:00:00 -0400"),
             Article(4, "No date", "", "https://example.com/four", "Example"),
+            Article(5, "Recent", "", "https://example.com/five", "Example", "2026-07-19"),
         ]
         edition = parse_edition(
             '{"intro":"导语","items":['
-            '{"article_id":1,"category":"动画","title":"昨天","summary":"昨天的消息"},'
+            '{"article_id":1,"category":"动画","title":"旧闻","summary":"一周前的消息"},'
             '{"article_id":4,"category":"动画","title":"未知","summary":"日期未知"},'
+            '{"article_id":5,"category":"动画","title":"较新","summary":"较新的消息"},'
             '{"article_id":3,"category":"动画","title":"今天二","summary":"今天第二条"},'
             '{"article_id":2,"category":"动画","title":"今天一","summary":"今天第一条"}'
             ']}',
@@ -199,7 +201,7 @@ class EditorTests(unittest.TestCase):
 
         prioritized = prioritize_current_day_items(edition, articles, now=local_now)
 
-        self.assertEqual([item.article_id for item in prioritized.items], [3, 2, 1, 4])
+        self.assertEqual([item.article_id for item in prioritized.items], [3, 2, 5, 1, 4])
 
     def test_editor_response_translates_ranking_with_the_news_in_one_json_object(self):
         ranking = Ranking(

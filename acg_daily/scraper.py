@@ -263,25 +263,13 @@ def _main_content_image_url(soup: BeautifulSoup, source_url: str) -> str:
 
 
 def _article_page_cover_url(body: bytes, source_url: str) -> str:
-    """Find a representative image from an article page before using a feed thumbnail."""
+    """Find an article-body image before falling back to page-wide metadata."""
 
     soup = BeautifulSoup(body, "html.parser")
-    for attrs in (
-        {"property": "og:image"},
-        {"property": "og:image:url"},
-        {"name": "twitter:image"},
-        {"name": "twitter:image:src"},
-        {"itemprop": "image"},
-    ):
-        node = soup.find("meta", attrs=attrs)
-        if node:
-            url = _image_url(node.get("content"), source_url)
-            if url:
-                return url
-
     for selector in (
         "article",
         "main article",
+        "[itemprop='articleBody']",
         ".entry-content",
         ".post-entry",
         ".post-content",
@@ -292,6 +280,19 @@ def _article_page_cover_url(body: bytes, source_url: str) -> str:
         node = soup.select_one(selector)
         if node:
             url = _first_image_url(node, source_url)
+            if url:
+                return url
+
+    for attrs in (
+        {"property": "og:image"},
+        {"property": "og:image:url"},
+        {"name": "twitter:image"},
+        {"name": "twitter:image:src"},
+        {"itemprop": "image"},
+    ):
+        node = soup.find("meta", attrs=attrs)
+        if node:
+            url = _image_url(node.get("content"), source_url)
             if url:
                 return url
     return _main_content_image_url(soup, source_url)
@@ -691,8 +692,25 @@ class NewsScraper:
         session: aiohttp.ClientSession,
         article: Article,
     ) -> tuple[str, bool]:
-        cover_urls: list[tuple[str, bool]] = []
         last_error: Exception | None = None
+        if article.cover_url:
+            for attempt in range(2):
+                try:
+                    return await self._fetch_cover_image(session, article.cover_url), False
+                except Exception as exc:
+                    last_error = exc
+                    logger.debug(
+                        "ACG 日报：列表或订阅源封面下载失败（%s｜%s，%s，第 %d/2 次）：%s",
+                        article.source,
+                        article.title,
+                        article.cover_url,
+                        attempt + 1,
+                        exc,
+                    )
+                    if attempt == 0:
+                        await asyncio.sleep(0.3)
+
+        detail_cover = ""
         for attempt in range(2):
             try:
                 final_url, body, _content_type = await _read_source_response(session, article.url)
@@ -712,7 +730,6 @@ class NewsScraper:
             last_error = None
             detail_cover = _article_page_cover_url(body, final_url)
             if detail_cover:
-                cover_urls.append((detail_cover, True))
                 logger.debug(
                     "ACG 日报：详情页找到封面候选（%s｜%s）。",
                     article.source,
@@ -726,20 +743,17 @@ class NewsScraper:
                 )
             break
 
-        if article.cover_url and article.cover_url not in {url for url, _is_detail in cover_urls}:
-            cover_urls.append((article.cover_url, False))
-        for cover_url, is_detail_cover in cover_urls:
+        if detail_cover:
             for attempt in range(2):
                 try:
-                    return await self._fetch_cover_image(session, cover_url), is_detail_cover
+                    return await self._fetch_cover_image(session, detail_cover), True
                 except Exception as exc:
                     last_error = exc
                     logger.debug(
-                        "ACG 日报：封面候选下载失败（%s｜%s，%s，%s，第 %d/2 次）：%s",
+                        "ACG 日报：详情页封面下载失败（%s｜%s，%s，第 %d/2 次）：%s",
                         article.source,
                         article.title,
-                        "详情页" if is_detail_cover else "列表或订阅源",
-                        cover_url,
+                        detail_cover,
                         attempt + 1,
                         exc,
                     )
