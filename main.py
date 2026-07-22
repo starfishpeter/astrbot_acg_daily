@@ -12,6 +12,11 @@ from astrbot.api.event import MessageChain
 from astrbot.api.star import Context, Star
 from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.tool import FunctionTool, ToolSet
+from astrbot.core.message.components import Plain
+from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
+from astrbot.core.platform.message_session import MessageSession
+from astrbot.core.platform.message_type import MessageType
+from astrbot.core.platform.platform_metadata import PlatformMetadata
 
 from .acg_daily.editor import (
     SYSTEM_PROMPT,
@@ -52,11 +57,31 @@ class CacheEntry:
     images: list[str]
 
 
-@dataclass(frozen=True)
-class _ScheduledDailyEvent:
-    """The session fields the existing generation path needs for a proactive send."""
+class _ScheduledDailyEvent(AstrMessageEvent):
+    """Synthetic AstrMessageEvent so scheduled tool_loop_agent can build AstrAgentContext."""
 
-    unified_msg_origin: str
+    def __init__(self, unified_msg_origin: str) -> None:
+        session = MessageSession.from_str(unified_msg_origin)
+        platform_meta = PlatformMetadata(
+            name=session.platform_name,
+            description="ACG Daily scheduled publish",
+            id=session.platform_id,
+        )
+        message = "ACG 日报定时发布"
+        msg_obj = AstrBotMessage()
+        msg_obj.type = session.message_type
+        msg_obj.self_id = "acg_daily"
+        msg_obj.session_id = session.session_id
+        msg_obj.message_id = f"acg-daily-{int(time.time())}"
+        msg_obj.sender = MessageMember(user_id="acg_daily", nickname="ACG Daily")
+        msg_obj.message = [Plain(message)]
+        msg_obj.message_str = message
+        msg_obj.raw_message = message
+        if session.message_type == MessageType.GROUP_MESSAGE:
+            msg_obj.group_id = session.session_id
+        super().__init__(message, msg_obj, platform_meta, session.session_id)
+        # Keep the exact proactive-send session, including platform instance id.
+        self.session = session
 
 
 class DailyEditorHooks(BaseAgentRunHooks):

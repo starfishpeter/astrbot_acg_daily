@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- 修复定时发布：合成事件改为真正的 `AstrMessageEvent` 子类，使带 Bangumi 译名工具的 `tool_loop_agent` 不再因 pydantic 类型校验失败而立刻降级为无工具重试。
+
 ## 0.5.2 - 2026-07-21
 
 - 移除 Tavily 资讯源、插件 API Key、页面提取和封面回退路径，避免在无法可靠获得文章对应封面的来源上增加成本；日报仅使用普通 RSS/Atom/新闻列表页来源。

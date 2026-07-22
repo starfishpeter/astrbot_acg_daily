@@ -34,6 +34,8 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("_publish_scheduled_daily_to_group", source)
         self.assertIn("message.url_image(image)", source)
         self.assertIn("定时发布", source)
+        self.assertIn("class _ScheduledDailyEvent(AstrMessageEvent)", source)
+        self.assertIn("MessageSession.from_str", source)
         self.assertIn("daily_publish_group_whitelist", schedule_source)
         self.assertIn("GroupMessage", schedule_source)
         self.assertNotIn("daily_publish_timezone", schedule_source)
