@@ -113,12 +113,80 @@ def _value_type(value: object) -> str:
     return type(value).__name__
 
 
-def _extract_json(text: str) -> dict[str, Any]:
+def _strip_code_fence(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+
+def _repair_unescaped_string_quotes(text: str) -> str:
+    """Escape bare double quotes that appear inside JSON string values.
+
+    Models often wrap emphasis with ASCII quotes, which breaks an otherwise complete
+    daily-report object and leaves only nested item objects parseable.
+    """
+
+    result: list[str] = []
+    in_string = False
+    escape = False
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if not in_string:
+            result.append(char)
+            if char == '"':
+                in_string = True
+            index += 1
+            continue
+        if escape:
+            result.append(char)
+            escape = False
+            index += 1
+            continue
+        if char == "\\":
+            result.append(char)
+            escape = True
+            index += 1
+            continue
+        if char == '"':
+            look_ahead = index + 1
+            while look_ahead < length and text[look_ahead] in " \t\r\n":
+                look_ahead += 1
+            if look_ahead >= length or text[look_ahead] in ",}]:":
+                in_string = False
+                result.append(char)
+            else:
+                result.append('\\"')
+            index += 1
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _edition_shape_score(value: dict[str, Any]) -> int:
+    """Prefer a full report object over a nested item accidentally decoded first."""
+
+    score = 0
+    items = value.get("items", _MISSING)
+    if isinstance(items, list):
+        score += 100 + min(len(items), 20)
+    ranking_items = value.get("ranking_items", _MISSING)
+    if isinstance(ranking_items, list):
+        score += 10
+    if isinstance(value.get("intro"), str):
+        score += 5
+    if "article_id" in value and "items" not in value:
+        score -= 50
+    return score
+
+
+def _decode_json_objects(text: str) -> list[dict[str, Any]]:
     decoder = json.JSONDecoder()
+    found: list[dict[str, Any]] = []
     for index, char in enumerate(text):
         if char != "{":
             continue
@@ -127,8 +195,24 @@ def _extract_json(text: str) -> dict[str, Any]:
         except JSONDecodeError:
             continue
         if isinstance(value, dict):
-            return value
-    raise ValueError("model response does not contain a JSON object")
+            found.append(value)
+    return found
+
+
+def _extract_json(text: str) -> dict[str, Any]:
+    text = _strip_code_fence(text)
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for variant in (text, _repair_unescaped_string_quotes(text)):
+        for value in _decode_json_objects(variant):
+            identity = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            candidates.append(value)
+    if not candidates:
+        raise ValueError("model response does not contain a JSON object")
+    return max(candidates, key=_edition_shape_score)
 
 
 def _bounded_text(value: object, limit: int) -> str:

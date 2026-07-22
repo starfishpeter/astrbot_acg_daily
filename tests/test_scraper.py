@@ -178,6 +178,32 @@ class ScraperTests(unittest.TestCase):
 
         self.assertEqual(cover_url, "https://example.com/images/cover.jpg")
 
+    def test_article_page_cover_skips_related_and_ranking_images(self):
+        page = b"""<!doctype html><html><body>
+        <article>
+          <div class="related-articles"><img src="/images/related-wrong.jpg"></div>
+          <div class="ranking-list"><img src="/images/ranking-wrong.jpg" width="120" height="120"></div>
+          <figure><img src="/images/correct-cover.jpg" width="800" height="450" alt="Official visual"></figure>
+        </article>
+        </body></html>"""
+
+        cover_url = _article_page_cover_url(page, "https://example.com/news/item")
+
+        self.assertEqual(cover_url, "https://example.com/images/correct-cover.jpg")
+
+    def test_article_page_cover_skips_logo_and_icon_urls(self):
+        page = b"""<!doctype html><html><body>
+        <article>
+          <img src="/images/site-logo.png" width="120" height="40">
+          <img src="/icons/share-button.svg" width="32" height="32">
+          <img src="/images/news-cover.jpg" width="640" height="360">
+        </article>
+        </body></html>"""
+
+        cover_url = _article_page_cover_url(page, "https://example.com/news/item")
+
+        self.assertEqual(cover_url, "https://example.com/images/news-cover.jpg")
+
     def test_article_page_cover_accepts_gnn_webp_and_png_urls(self):
         for image_name in ("cover.WEBP", "cover.PNG"):
             with self.subTest(image_name=image_name):

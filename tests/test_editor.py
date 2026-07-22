@@ -113,6 +113,30 @@ class EditorTests(unittest.TestCase):
         self.assertIn("items=缺失", diagnosis)
         self.assertIn(completion, diagnosis)
 
+    def test_extract_json_repairs_unescaped_quotes_and_prefers_edition_object(self):
+        # Models often wrap emphasis with bare ASCII quotes, which breaks the outer
+        # object and used to leave only the first nested item parseable.
+        response = (
+            '{"intro":"导语","items":['
+            '{"article_id":1,"category":"动画","title":"标题","summary":"正常摘要","reason":"关注"},'
+            '{"article_id":2,"category":"漫画","title":"另一标题",'
+            '"summary":"描绘无血缘关系"姐妹"羁绊的连载启动"}'
+            '],"ranking_items":[{"rank":1,"title":"作品一"}]}'
+        )
+
+        edition, translated, error = parse_edition_with_ranking(
+            response,
+            self.articles,
+            5,
+            Ranking("测试榜单", "测试来源", (RankingEntry(1, "Original"),)),
+        )
+
+        self.assertEqual(edition.intro, "导语")
+        self.assertEqual([item.article_id for item in edition.items], [1, 2])
+        self.assertIn("姐妹", edition.items[1].summary)
+        self.assertEqual(error, "")
+        self.assertEqual(translated.entries[0].title, "作品一")
+
     def test_configured_editor_provider_uses_an_optional_fixed_provider(self):
         self.assertEqual(configured_editor_provider("  deepseek/deepseek-v4-pro  "), "deepseek/deepseek-v4-pro")
         self.assertIsNone(configured_editor_provider("\n\t"))

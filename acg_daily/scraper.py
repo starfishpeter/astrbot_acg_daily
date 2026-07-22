@@ -217,24 +217,142 @@ def _srcset_image_url(value: object, source_url: str) -> str:
     return ""
 
 
-def _first_image_url(value: object, source_url: str) -> str:
-    soup = BeautifulSoup(str(value or ""), "html.parser")
-    for node in soup.find_all(True):
-        for attribute in ("srcset", "data-srcset"):
-            url = _srcset_image_url(node.get(attribute), source_url)
-            if url:
-                return url
-        for attribute in (
-            "src",
-            "data-src",
-            "data-lazy-src",
-            "data-original",
-            "data-image",
-        ):
-            url = _image_url(node.get(attribute), source_url)
-            if url:
-                return url
+_EXCLUDED_IMAGE_REGION = re.compile(
+    r"(?:^|[-_\s])(?:ad|ads|advert(?:isement)?|banner|sponsor|promo|nav|menu|header|footer|"
+    r"sidebar|related|recommend|ranking|pickup|popular|widget|share|social|sns|comment|"
+    r"pager|pagination|breadcrumb|tag-list|more-news|series-list|side-box|sidebox|"
+    r"relation|kanren|osusume|ranking-list)(?:$|[-_\s])",
+    re.IGNORECASE,
+)
+_NON_COVER_IMAGE_HINT = re.compile(
+    r"(?:logo|icon|favicon|avatar|sprite|emoji|badge|button|pixel|tracking|1x1|"
+    r"spacer|blank|transparent|share[-_]?|sns[-_]?|facebook|twitter|line\.me|"
+    r"youtube|instagram|tiktok|qr[-_]?code)",
+    re.IGNORECASE,
+)
+
+
+def _node_label(node: object) -> str:
+    if not getattr(node, "name", None):
+        return ""
+    classes = " ".join(str(part) for part in node.get("class", []) or [])
+    return f"{node.name} {classes} {node.get('id', '')} {node.get('role', '')}".lower()
+
+
+def _is_excluded_image_region(node: object) -> bool:
+    for ancestor in [node, *getattr(node, "parents", [])]:
+        if not getattr(ancestor, "name", None):
+            continue
+        if ancestor.name in {"nav", "aside", "header", "footer"}:
+            return True
+        if _EXCLUDED_IMAGE_REGION.search(_node_label(ancestor)):
+            return True
+    return False
+
+
+def _declared_image_edge(node: object) -> int:
+    """Best-effort width/height from attributes, ignoring unit-less zero values."""
+
+    edges: list[int] = []
+    for attribute in ("width", "height"):
+        raw = str(getattr(node, "get", lambda *_: None)(attribute) or "").strip().lower()
+        match = re.match(r"(\d+)", raw)
+        if match:
+            edges.append(int(match.group(1)))
+    style = str(getattr(node, "get", lambda *_: None)("style") or "")
+    for key in ("width", "height"):
+        match = re.search(rf"{key}\s*:\s*(\d+)", style, flags=re.IGNORECASE)
+        if match:
+            edges.append(int(match.group(1)))
+    return max(edges) if edges else 0
+
+
+def _is_probable_cover_url(url: str, node: object | None = None) -> bool:
+    if not url or _NON_COVER_IMAGE_HINT.search(url):
+        return False
+    if node is not None:
+        if _NON_COVER_IMAGE_HINT.search(_node_label(node)):
+            return False
+        edge = _declared_image_edge(node)
+        if 0 < edge < 80:
+            return False
+        if _is_excluded_image_region(node):
+            return False
+    return True
+
+
+def _image_url_from_node(node: object, source_url: str) -> str:
+    if not getattr(node, "get", None):
+        return ""
+    for attribute in ("srcset", "data-srcset"):
+        url = _srcset_image_url(node.get(attribute), source_url)
+        if url:
+            return url
+    for attribute in (
+        "src",
+        "data-src",
+        "data-lazy-src",
+        "data-original",
+        "data-image",
+    ):
+        url = _image_url(node.get(attribute), source_url)
+        if url:
+            return url
     return ""
+
+
+def _score_cover_candidate(url: str, node: object | None = None, *, base: int = 0) -> int:
+    if not _is_probable_cover_url(url, node):
+        return -1
+    score = base
+    if node is not None:
+        edge = _declared_image_edge(node)
+        if edge >= 400:
+            score += 4
+        elif edge >= 200:
+            score += 2
+        if node.name == "img" and any(parent.name == "figure" for parent in node.parents if getattr(parent, "name", None)):
+            score += 2
+        alt = clean_text(node.get("alt"), 80) if node.name == "img" else ""
+        if alt:
+            score += 1
+    path = urlsplit(url).path.lower()
+    if re.search(r"(?:cover|hero|main|eyecatch|thumbnail|thumb|ogp|opengraph)", path):
+        score += 2
+    return score
+
+
+def _iter_image_nodes(value: object) -> list[object]:
+    """Walk image-bearing tags while preserving parent context for region filters."""
+
+    if hasattr(value, "find_all"):
+        nodes: list[object] = []
+        if getattr(value, "name", None):
+            nodes.append(value)
+        nodes.extend(value.find_all(True))
+        return nodes
+    return BeautifulSoup(str(value or ""), "html.parser").find_all(True)
+
+
+def _best_image_url(value: object, source_url: str, *, base: int = 10) -> str:
+    """Pick the strongest cover-like image inside a fragment instead of the first tag."""
+
+    best_url = ""
+    best_score = -1
+    for index, node in enumerate(_iter_image_nodes(value)):
+        url = _image_url_from_node(node, source_url)
+        if not url:
+            continue
+        # Prefer earlier content images when scores are otherwise equal.
+        score = _score_cover_candidate(url, node, base=base) - min(index, 20) // 10
+        if score > best_score:
+            best_score = score
+            best_url = url
+    return best_url if best_score >= 0 else ""
+
+
+def _first_image_url(value: object, source_url: str) -> str:
+    return _best_image_url(value, source_url)
 
 
 def _main_content_image_url(soup: BeautifulSoup, source_url: str) -> str:
@@ -243,29 +361,32 @@ def _main_content_image_url(soup: BeautifulSoup, source_url: str) -> str:
     main = soup.select_one("main")
     if main is None:
         return ""
-    excluded = re.compile(
-        r"(?:^|[-_\s])(?:ad|ads|advert(?:isement)?|banner|sponsor|promo|nav|menu|header|footer|sidebar)(?:$|[-_\s])",
-        re.IGNORECASE,
-    )
-    for image in main.find_all("img"):
-        ancestors = [image, *image.parents]
-        if any(
-            ancestor.name in {"nav", "aside", "header", "footer"}
-            or excluded.search(" ".join(ancestor.get("class", [])) + " " + str(ancestor.get("id", "")))
-            for ancestor in ancestors
-            if getattr(ancestor, "name", None)
-        ):
+    return _best_image_url(main, source_url, base=6)
+
+
+def _metadata_cover_url(soup: BeautifulSoup, source_url: str) -> str:
+    for attrs in (
+        {"property": "og:image"},
+        {"property": "og:image:url"},
+        {"name": "twitter:image"},
+        {"name": "twitter:image:src"},
+        {"itemprop": "image"},
+    ):
+        node = soup.find("meta", attrs=attrs)
+        if not node:
             continue
-        url = _first_image_url(image, source_url)
-        if url:
+        url = _image_url(node.get("content"), source_url)
+        if url and _is_probable_cover_url(url):
             return url
     return ""
 
 
 def _article_page_cover_url(body: bytes, source_url: str) -> str:
-    """Find an article-body image before falling back to page-wide metadata."""
+    """Prefer a scored article-body cover, then page metadata, then main content."""
 
     soup = BeautifulSoup(body, "html.parser")
+    best_url = ""
+    best_score = -1
     for selector in (
         "article",
         "main article",
@@ -275,26 +396,29 @@ def _article_page_cover_url(body: bytes, source_url: str) -> str:
         ".post-content",
         ".article-content",
         ".article-body",
+        "main figure",
+        "article figure",
         "figure",
     ):
-        node = soup.select_one(selector)
-        if node:
-            url = _first_image_url(node, source_url)
-            if url:
-                return url
+        for node in soup.select(selector):
+            if _is_excluded_image_region(node):
+                continue
+            url = _best_image_url(node, source_url, base=12)
+            if not url:
+                continue
+            score = _score_cover_candidate(url, base=12)
+            if score > best_score:
+                best_score = score
+                best_url = url
+            if best_score >= 12:
+                return best_url
 
-    for attrs in (
-        {"property": "og:image"},
-        {"property": "og:image:url"},
-        {"name": "twitter:image"},
-        {"name": "twitter:image:src"},
-        {"itemprop": "image"},
-    ):
-        node = soup.find("meta", attrs=attrs)
-        if node:
-            url = _image_url(node.get("content"), source_url)
-            if url:
-                return url
+    if best_url:
+        return best_url
+
+    metadata = _metadata_cover_url(soup, source_url)
+    if metadata:
+        return metadata
     return _main_content_image_url(soup, source_url)
 
 
@@ -693,17 +817,25 @@ class NewsScraper:
         article: Article,
     ) -> tuple[str, bool]:
         last_error: Exception | None = None
-        if article.cover_url:
+        entry_cover = article.cover_url if _is_probable_cover_url(article.cover_url) else ""
+        if article.cover_url and not entry_cover:
+            logger.debug(
+                "ACG 日报：跳过不像封面的列表或订阅源图片（%s｜%s，%s）。",
+                article.source,
+                article.title,
+                article.cover_url,
+            )
+        if entry_cover:
             for attempt in range(2):
                 try:
-                    return await self._fetch_cover_image(session, article.cover_url), False
+                    return await self._fetch_cover_image(session, entry_cover), False
                 except Exception as exc:
                     last_error = exc
                     logger.debug(
                         "ACG 日报：列表或订阅源封面下载失败（%s｜%s，%s，第 %d/2 次）：%s",
                         article.source,
                         article.title,
-                        article.cover_url,
+                        entry_cover,
                         attempt + 1,
                         exc,
                     )
@@ -737,7 +869,7 @@ class NewsScraper:
                 )
             else:
                 logger.debug(
-                    "ACG 日报：详情页未找到封面候选，将尝试列表或订阅源封面（%s｜%s）。",
+                    "ACG 日报：详情页未找到封面候选，将结束封面尝试（%s｜%s）。",
                     article.source,
                     article.title,
                 )
