@@ -130,6 +130,7 @@ def _repair_unescaped_string_quotes(text: str) -> str:
 
     result: list[str] = []
     in_string = False
+    value_string = False
     escape = False
     index = 0
     length = len(text)
@@ -139,6 +140,12 @@ def _repair_unescaped_string_quotes(text: str) -> str:
             result.append(char)
             if char == '"':
                 in_string = True
+                previous = ""
+                for previous_char in reversed(result[:-1]):
+                    if previous_char not in " \t\r\n":
+                        previous = previous_char
+                        break
+                value_string = previous == ":"
             index += 1
             continue
         if escape:
@@ -155,7 +162,16 @@ def _repair_unescaped_string_quotes(text: str) -> str:
             look_ahead = index + 1
             while look_ahead < length and text[look_ahead] in " \t\r\n":
                 look_ahead += 1
-            if look_ahead >= length or text[look_ahead] in ",}]:":
+            closes_key = not value_string and look_ahead < length and text[look_ahead] == ":"
+            closes_value = value_string and (
+                look_ahead >= length
+                or text[look_ahead] in "}]"
+                or (
+                    text[look_ahead] == ","
+                    and _looks_like_next_object_key(text, look_ahead + 1)
+                )
+            )
+            if closes_key or closes_value:
                 in_string = False
                 result.append(char)
             else:
@@ -165,6 +181,30 @@ def _repair_unescaped_string_quotes(text: str) -> str:
         result.append(char)
         index += 1
     return "".join(result)
+
+
+def _looks_like_next_object_key(text: str, index: int) -> bool:
+    """Recognize the ``,"key":`` delimiter without mistaking prose for JSON."""
+
+    while index < len(text) and text[index] in " \t\r\n":
+        index += 1
+    if index >= len(text) or text[index] != '"':
+        return False
+    index += 1
+    escaped = False
+    while index < len(text):
+        char = text[index]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            index += 1
+            while index < len(text) and text[index] in " \t\r\n":
+                index += 1
+            return index < len(text) and text[index] == ":"
+        index += 1
+    return False
 
 
 def _edition_shape_score(value: dict[str, Any]) -> int:

@@ -36,6 +36,9 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("定时发布", source)
         self.assertIn("class _ScheduledDailyEvent(AstrMessageEvent)", source)
         self.assertIn("MessageSession.from_str", source)
+        self.assertIn("published_targets = await self._publish_scheduled_daily", source)
+        self.assertIn("for target in published_targets", source)
+        self.assertIn("if not self._can_send_result(\"定时日报\")", source)
         self.assertIn("daily_publish_group_whitelist", schedule_source)
         self.assertIn("GroupMessage", schedule_source)
         self.assertNotIn("daily_publish_timezone", schedule_source)
@@ -46,6 +49,11 @@ class MainSourceTests(unittest.TestCase):
         self.assertIn("渲染单张长图", source)
         self.assertIn("return [image]", source)
         self.assertNotIn("items_per_page", source)
+
+    def test_plugin_metadata_has_the_current_release_version(self):
+        metadata = (Path(__file__).parent.parent / "metadata.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("version: 0.5.3", metadata)
 
     def test_debug_command_probes_sources_and_covers_without_editing_or_rendering(self):
         source = (Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")

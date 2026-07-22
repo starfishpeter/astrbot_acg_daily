@@ -204,6 +204,16 @@ class ScraperTests(unittest.TestCase):
 
         self.assertEqual(cover_url, "https://example.com/images/news-cover.jpg")
 
+    def test_article_page_cover_compares_scores_across_content_regions(self):
+        page = b"""<!doctype html><html><body>
+        <div class="entry-content"><img src="/images/generic.jpg" width="200" height="120"></div>
+        <figure><img src="/images/official-cover.jpg" width="800" height="450" alt="Official visual"></figure>
+        </body></html>"""
+
+        cover_url = _article_page_cover_url(page, "https://example.com/news/item")
+
+        self.assertEqual(cover_url, "https://example.com/images/official-cover.jpg")
+
     def test_article_page_cover_accepts_gnn_webp_and_png_urls(self):
         for image_name in ("cover.WEBP", "cover.PNG"):
             with self.subTest(image_name=image_name):

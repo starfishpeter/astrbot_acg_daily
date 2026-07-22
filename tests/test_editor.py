@@ -137,6 +137,18 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(error, "")
         self.assertEqual(translated.entries[0].title, "作品一")
 
+    def test_extract_json_repairs_quoted_prose_followed_by_a_comma(self):
+        response = (
+            '{"intro":"导语","items":['
+            '{"article_id":1,"category":"动画","title":"标题",'
+            '"summary":"角色说"你好", 然后离开","reason":"关注"}'
+            ']}'
+        )
+
+        edition = parse_edition(response, self.articles, 5)
+
+        self.assertEqual(edition.items[0].summary, '角色说"你好", 然后离开')
+
     def test_configured_editor_provider_uses_an_optional_fixed_provider(self):
         self.assertEqual(configured_editor_provider("  deepseek/deepseek-v4-pro  "), "deepseek/deepseek-v4-pro")
         self.assertIsNone(configured_editor_provider("\n\t"))

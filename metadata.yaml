@@ -1,7 +1,7 @@
 name: astrbot_plugin_acg_daily
 display_name: ACG 日报
 desc: 从可配置资讯源即时采集 ACG 新闻，经 AI 筛选和润色后生成图文日报。
-version: 0.5.2
+version: 0.5.3
 author: starfishpeter
 repo: https://github.com/starfishpeter/astrbot_acg_daily
 support_platforms:

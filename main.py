@@ -308,10 +308,10 @@ class AcgDailyPlugin(Star):
                             if (target, settings.time.text) not in self._last_scheduled_publish_keys
                         )
                         if pending_targets:
+                            published_targets = await self._publish_scheduled_daily(settings, pending_targets)
                             self._last_scheduled_publish_keys.update(
-                                (target, settings.time.text) for target in pending_targets
+                                (target, settings.time.text) for target in published_targets
                             )
-                            await self._publish_scheduled_daily(settings, pending_targets)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -344,7 +344,7 @@ class AcgDailyPlugin(Star):
         self,
         settings: DailyPublishSettings,
         targets: tuple[str, ...],
-    ) -> None:
+    ) -> tuple[str, ...]:
         urls = self._source_urls()
         logger.info(
             "ACG 日报：定时发布触发，将发送至 %d 个白名单群聊，当前配置 %d 个资讯源。",
@@ -353,40 +353,47 @@ class AcgDailyPlugin(Star):
         )
         if not urls:
             logger.warning("ACG 日报：定时发布已跳过，未配置有效资讯源。")
-            return
+            return ()
 
+        published_targets: list[str] = []
         for target in targets:
-            await self._publish_scheduled_daily_to_group(target, urls)
+            if await self._publish_scheduled_daily_to_group(target, urls):
+                published_targets.append(target)
+        return tuple(published_targets)
 
     async def _publish_scheduled_daily_to_group(
         self,
         target: str,
         urls: list[str],
-    ) -> None:
+    ) -> bool:
         try:
             resolved_target = self._resolve_scheduled_publish_target(target)
         except ValueError as exc:
             logger.error("ACG 日报：定时发布未开始，目标 %s 无法匹配运行中的 QQ 平台：%s", target, exc)
-            return
+            return False
         if resolved_target != target:
             logger.info("ACG 日报：定时发布目标已从 %s 解析为运行中平台会话 %s。", target, resolved_target)
         target = resolved_target
         lock = self._session_locks.setdefault(target, asyncio.Lock())
         if lock.locked():
             logger.warning("ACG 日报：定时发布已跳过，白名单群聊 %s 正在生成另一份日报。", target)
-            return
+            return False
 
         async with lock:
             started_at = time.monotonic()
             try:
                 images = await self._create_daily_images_for_session(target, urls)
                 if not self._can_send_result("定时日报"):
-                    return
+                    return False
+                if not images:
+                    raise RuntimeError("日报生成未返回图片")
                 logger.info(
                     "ACG 日报：定时发布已生成单张长图，开始发送至 %s。",
                     target,
                 )
                 for image in images:
+                    if not self._can_send_result("定时日报"):
+                        return False
                     message = MessageChain()
                     if image.startswith(("http://", "https://")):
                         message.url_image(image)
@@ -404,8 +411,10 @@ class AcgDailyPlugin(Star):
                     target,
                     time.monotonic() - started_at,
                 )
+                return True
             except Exception:
                 logger.exception("ACG 日报：定时发布失败，白名单群聊 %s。", target)
+                return False
 
     def _resolve_scheduled_publish_target(self, target: str) -> str:
         return resolve_publish_group_target(

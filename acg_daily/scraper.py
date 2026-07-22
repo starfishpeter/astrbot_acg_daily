@@ -334,7 +334,7 @@ def _iter_image_nodes(value: object) -> list[object]:
     return BeautifulSoup(str(value or ""), "html.parser").find_all(True)
 
 
-def _best_image_url(value: object, source_url: str, *, base: int = 10) -> str:
+def _best_image_candidate(value: object, source_url: str, *, base: int = 10) -> tuple[str, int]:
     """Pick the strongest cover-like image inside a fragment instead of the first tag."""
 
     best_url = ""
@@ -348,7 +348,11 @@ def _best_image_url(value: object, source_url: str, *, base: int = 10) -> str:
         if score > best_score:
             best_score = score
             best_url = url
-    return best_url if best_score >= 0 else ""
+    return (best_url, best_score) if best_score >= 0 else ("", -1)
+
+
+def _best_image_url(value: object, source_url: str, *, base: int = 10) -> str:
+    return _best_image_candidate(value, source_url, base=base)[0]
 
 
 def _first_image_url(value: object, source_url: str) -> str:
@@ -403,15 +407,12 @@ def _article_page_cover_url(body: bytes, source_url: str) -> str:
         for node in soup.select(selector):
             if _is_excluded_image_region(node):
                 continue
-            url = _best_image_url(node, source_url, base=12)
+            url, score = _best_image_candidate(node, source_url, base=12)
             if not url:
                 continue
-            score = _score_cover_candidate(url, base=12)
             if score > best_score:
                 best_score = score
                 best_url = url
-            if best_score >= 12:
-                return best_url
 
     if best_url:
         return best_url
